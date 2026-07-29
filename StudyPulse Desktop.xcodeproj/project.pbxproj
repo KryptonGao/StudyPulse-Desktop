@@ -1,0 +1,549 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 110;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		2749563F301A693D00754B66 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 27495629301A693C00754B66 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 27495630301A693C00754B66;
+			remoteInfo = "StudyPulse Desktop";
+		};
+		27495649301A693D00754B66 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 27495629301A693C00754B66 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 27495630301A693C00754B66;
+			remoteInfo = "StudyPulse Desktop";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		27495631301A693C00754B66 /* StudyPulse Desktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "StudyPulse Desktop.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		2749563E301A693D00754B66 /* StudyPulse DesktopTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "StudyPulse DesktopTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		27495648301A693D00754B66 /* StudyPulse DesktopUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "StudyPulse DesktopUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		27495633301A693C00754B66 /* StudyPulse Desktop */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "StudyPulse Desktop";
+			sourceTree = "<group>";
+		};
+		27495641301A693D00754B66 /* StudyPulse DesktopTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "StudyPulse DesktopTests";
+			sourceTree = "<group>";
+		};
+		2749564B301A693D00754B66 /* StudyPulse DesktopUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "StudyPulse DesktopUITests";
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2749562E301A693C00754B66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		2749563B301A693D00754B66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+		27495645301A693D00754B66 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		27495628301A693C00754B66 = {
+			isa = PBXGroup;
+			children = (
+				27495633301A693C00754B66 /* StudyPulse Desktop */,
+				27495641301A693D00754B66 /* StudyPulse DesktopTests */,
+				2749564B301A693D00754B66 /* StudyPulse DesktopUITests */,
+				27495632301A693C00754B66 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		27495632301A693C00754B66 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				27495631301A693C00754B66 /* StudyPulse Desktop.app */,
+				2749563E301A693D00754B66 /* StudyPulse DesktopTests.xctest */,
+				27495648301A693D00754B66 /* StudyPulse DesktopUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		27495630301A693C00754B66 /* StudyPulse Desktop */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 27495650301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse Desktop" */;
+			buildPhases = (
+				2749562D301A693C00754B66 /* Sources */,
+				2749562E301A693C00754B66 /* Frameworks */,
+				2749562F301A693C00754B66 /* Resources */,
+			);
+			buildRules = (
+			);
+			fileSystemSynchronizedGroups = (
+				27495633301A693C00754B66 /* StudyPulse Desktop */,
+			);
+			name = "StudyPulse Desktop";
+			productName = "StudyPulse Desktop";
+			productReference = 27495631301A693C00754B66 /* StudyPulse Desktop.app */;
+			productType = "com.apple.product-type.application";
+		};
+		2749563D301A693D00754B66 /* StudyPulse DesktopTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 27495653301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse DesktopTests" */;
+			buildPhases = (
+				2749563A301A693D00754B66 /* Sources */,
+				2749563B301A693D00754B66 /* Frameworks */,
+				2749563C301A693D00754B66 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				27495640301A693D00754B66 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				27495641301A693D00754B66 /* StudyPulse DesktopTests */,
+			);
+			name = "StudyPulse DesktopTests";
+			productName = "StudyPulse DesktopTests";
+			productReference = 2749563E301A693D00754B66 /* StudyPulse DesktopTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		27495647301A693D00754B66 /* StudyPulse DesktopUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 27495656301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse DesktopUITests" */;
+			buildPhases = (
+				27495644301A693D00754B66 /* Sources */,
+				27495645301A693D00754B66 /* Frameworks */,
+				27495646301A693D00754B66 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2749564A301A693D00754B66 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				2749564B301A693D00754B66 /* StudyPulse DesktopUITests */,
+			);
+			name = "StudyPulse DesktopUITests";
+			productName = "StudyPulse DesktopUITests";
+			productReference = 27495648301A693D00754B66 /* StudyPulse DesktopUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		27495629301A693C00754B66 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					27495630301A693C00754B66 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					2749563D301A693D00754B66 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 27495630301A693C00754B66;
+					};
+					27495647301A693D00754B66 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 27495630301A693C00754B66;
+					};
+				};
+			};
+			buildConfigurationList = 2749562C301A693C00754B66 /* Build configuration list for PBXProject "StudyPulse Desktop" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 27495628301A693C00754B66;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 27495632301A693C00754B66 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				27495630301A693C00754B66 /* StudyPulse Desktop */,
+				2749563D301A693D00754B66 /* StudyPulse DesktopTests */,
+				27495647301A693D00754B66 /* StudyPulse DesktopUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2749562F301A693C00754B66 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		2749563C301A693D00754B66 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		27495646301A693D00754B66 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2749562D301A693C00754B66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+		2749563A301A693D00754B66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+		27495644301A693D00754B66 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		27495640301A693D00754B66 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 27495630301A693C00754B66 /* StudyPulse Desktop */;
+			targetProxy = 2749563F301A693D00754B66 /* PBXContainerItemProxy */;
+		};
+		2749564A301A693D00754B66 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 27495630301A693C00754B66 /* StudyPulse Desktop */;
+			targetProxy = 27495649301A693D00754B66 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2749564E301A693D00754B66 /* Debug configuration for PBXProject "StudyPulse Desktop" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		2749564F301A693D00754B66 /* Release configuration for PBXProject "StudyPulse Desktop" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		27495651301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse Desktop" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-Desktop";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		27495652301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse Desktop" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-Desktop";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		27495654301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse DesktopTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-DesktopTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/StudyPulse Desktop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/StudyPulse Desktop";
+			};
+			name = Debug;
+		};
+		27495655301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse DesktopTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-DesktopTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/StudyPulse Desktop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/StudyPulse Desktop";
+			};
+			name = Release;
+		};
+		27495657301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse DesktopUITests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-DesktopUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = "StudyPulse Desktop";
+			};
+			name = Debug;
+		};
+		27495658301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse DesktopUITests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = D2G8858WRZ;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "space.chenkai.StudyPulse-DesktopUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_TARGET_NAME = "StudyPulse Desktop";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2749562C301A693C00754B66 /* Build configuration list for PBXProject "StudyPulse Desktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2749564E301A693D00754B66 /* Debug configuration for PBXProject "StudyPulse Desktop" */,
+				2749564F301A693D00754B66 /* Release configuration for PBXProject "StudyPulse Desktop" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		27495650301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse Desktop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				27495651301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse Desktop" */,
+				27495652301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse Desktop" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		27495653301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse DesktopTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				27495654301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse DesktopTests" */,
+				27495655301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse DesktopTests" */,
+			);
+			defaultConfigurationName = Release;
+		};
+		27495656301A693D00754B66 /* Build configuration list for PBXNativeTarget "StudyPulse DesktopUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				27495657301A693D00754B66 /* Debug configuration for PBXNativeTarget "StudyPulse DesktopUITests" */,
+				27495658301A693D00754B66 /* Release configuration for PBXNativeTarget "StudyPulse DesktopUITests" */,
+			);
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 27495629301A693C00754B66 /* Project object */;
+	validationLevel = 1;
+}
