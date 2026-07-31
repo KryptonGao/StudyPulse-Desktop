@@ -1,0 +1,24 @@
+{
+  "formatIdentifier": "com.chenkai.gao.studypulse.backup",
+  "formatVersion": 1,
+  "appVersion": "1.0",
+  "appBuild": "1",
+  "schemaVersion": 3,
+  "createdAt": "2026-07-30T09:00:00Z",
+  "recordCounts": {
+    "grades": 0,
+    "mistakes": 0,
+    "exams": 0,
+    "comprehensiveExams": 0,
+    "tasks": 0,
+    "phases": 0,
+    "routines": 0,
+    "routineInstances": 0,
+    "diaryEntries": 0,
+    "studySessions": 0
+  },
+  "includesMedia": false,
+  "includesDerivedHealthData": false,
+  "encrypted": false,
+  "warnings": []
+}

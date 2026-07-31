@@ -1,0 +1,6 @@
+[bindings.swift]
+module_name = "StudyPulseCore"
+ffi_module_name = "StudyPulseCoreFFI"
+ffi_module_filename = "StudyPulseCoreFFI"
+generate_immutable_records = true
+
