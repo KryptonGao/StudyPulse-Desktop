@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 use studypulse_ffi::{
     AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, BackupExportOptionsDto,
     BackupExportResultDto, BackupInspectionDto, BackupResolutionDto, ByokConfigDto,
-    CloudAccountDto, CloudAuthTokensDto, ConfirmationDecisionDto, CoreError, ExamDto, FileEntryDto,
-    GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto, RestoreModeDto, RunStatusDto,
-    SearchMatchDto, SessionIntensityDto, StudyPhaseDto, StudySessionDto, SubjectDto, TaskDto,
-    TimeInvestmentSubjectDto, TimerSnapshotDto, TodaySnapshotDto, WorkspaceDto,
+    CloudAccountDto, CloudAuthTokensDto, ConfirmationDecisionDto, CoreError, DiaryEntryDto,
+    ExamDto, FileEntryDto, GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto,
+    RestoreModeDto, ReviewStateDto, RunStatusDto, SearchMatchDto, SessionIntensityDto,
+    StudyPhaseDto, StudySessionDto, SubjectDto, TaskDto, TimeInvestmentSubjectDto,
+    TimerSnapshotDto, TodaySnapshotDto, TrendsSnapshotDto, WorkspaceDto,
 };
 use tauri::{Manager, State};
 use thiserror::Error;
@@ -560,6 +561,8 @@ read_command!(get_subjects, get_subjects, Vec<SubjectDto>);
 read_command!(get_phases, get_phases, Vec<StudyPhaseDto>);
 read_command!(get_grades, get_grades, Vec<GradeDto>);
 read_command!(get_mistakes, get_mistakes, Vec<MistakeNoteDto>);
+read_command!(get_due_mistakes, get_due_mistakes, Vec<MistakeNoteDto>);
+read_command!(get_diary_entries, get_diary_entries, Vec<DiaryEntryDto>);
 read_command!(get_exams, get_exams, Vec<ExamDto>);
 read_command!(get_study_sessions, get_study_sessions, Vec<StudySessionDto>);
 read_command!(
@@ -569,6 +572,14 @@ read_command!(
 );
 read_command!(get_today_snapshot, get_today_snapshot, TodaySnapshotDto);
 read_command!(list_library_files, list_library_files, Vec<FileEntryDto>);
+
+#[tauri::command]
+async fn get_learning_trends(
+    range_days: u32,
+    state: State<'_, AppState>,
+) -> Result<TrendsSnapshotDto, AppError> {
+    core_call(state, move |core| core.get_learning_trends(range_days as i64)).await
+}
 
 #[tauri::command]
 async fn active_timer(state: State<'_, AppState>) -> Result<TimerSnapshotDto, AppError> {
@@ -595,6 +606,7 @@ delete_command!(delete_subject, delete_subject);
 delete_command!(delete_phase, delete_phase);
 delete_command!(delete_grade, delete_grade);
 delete_command!(delete_mistake, delete_mistake);
+delete_command!(delete_diary_entry, delete_diary_entry);
 delete_command!(delete_exam, delete_exam);
 delete_command!(delete_study_session, delete_study_session);
 delete_command!(
@@ -623,12 +635,28 @@ async fn upsert_mistake(value: MistakeNoteDto, state: State<'_, AppState>) -> Re
 }
 
 #[tauri::command]
+async fn upsert_diary_entry(
+    value: DiaryEntryDto,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_diary_entry(value)).await
+}
+
+#[tauri::command]
 async fn review_mistake(
     id: String,
     quality: i64,
     state: State<'_, AppState>,
 ) -> Result<studypulse_ffi::SrsReviewResultDto, AppError> {
     core_call(state, move |core| core.review_mistake(id, quality)).await
+}
+
+#[tauri::command]
+async fn enroll_mistake(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<ReviewStateDto, AppError> {
+    core_call(state, move |core| core.enroll_mistake(id)).await
 }
 
 #[tauri::command]
@@ -825,7 +853,13 @@ pub fn run() {
             get_mistakes,
             upsert_mistake,
             delete_mistake,
+            delete_diary_entry,
+            get_due_mistakes,
+            get_diary_entries,
+            get_learning_trends,
             review_mistake,
+            enroll_mistake,
+            upsert_diary_entry,
             get_exams,
             upsert_exam,
             delete_exam,

@@ -1,16 +1,311 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
 
 use crate::{
-    ExamFull, InvestmentTarget, MistakeNoteFull, ReviewState, StudyPhase, StudySession, SubTask,
-    TaskItem, TimeInvestmentSubject,
+    DiaryEntry, ExamFull, Grade, InvestmentTarget, MistakeNoteFull, ReviewState, StudyPhase,
+    StudySession, SubTask, Subject, TaskItem, TimeInvestmentSubject,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SrsReviewResult {
     pub state: ReviewState,
     pub next_review_date: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SrsOverview {
+    pub due_count: usize,
+    pub upcoming_count: usize,
+    pub total_enrolled: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyTrendPoint {
+    pub date: String,
+    pub study_minutes: i64,
+    pub activity_points: i64,
+    pub completed_session_count: usize,
+    pub review_count: usize,
+    pub grade_count: usize,
+    pub mood_score: Option<f64>,
+    pub energy_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectTrend {
+    pub subject: String,
+    pub display_name: String,
+    pub average_score_rate: f64,
+    pub latest_score_rate: f64,
+    pub average_ranking: Option<f64>,
+    pub latest_ranking: Option<i64>,
+    pub grade_count: usize,
+    pub mistake_count: usize,
+    pub due_mistake_count: usize,
+    pub trend: String,
+    pub needs_attention: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrendsSnapshot {
+    pub start_date: String,
+    pub end_date: String,
+    pub active_days: usize,
+    pub current_streak: i64,
+    pub total_study_minutes: i64,
+    pub average_mood: Option<f64>,
+    pub average_energy: Option<f64>,
+    pub daily_points: Vec<DailyTrendPoint>,
+    pub subjects: Vec<SubjectTrend>,
+    pub srs: SrsOverview,
+}
+
+fn date_key(value: &str) -> Option<chrono::NaiveDate> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|date| date.date_naive())
+}
+
+fn score_rate(grade: &Grade, subjects: &HashMap<String, &Subject>) -> f64 {
+    let full_score = grade
+        .full_score
+        .or_else(|| {
+            subjects
+                .get(&grade.subject)
+                .map(|subject| subject.full_score)
+        })
+        .filter(|value| *value > 0.0)
+        .unwrap_or(100.0);
+    (grade.score / full_score).clamp(0.0, 1.0)
+}
+
+pub fn srs_overview(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> SrsOverview {
+    let upcoming_cutoff = now + Duration::days(7);
+    let mut result = SrsOverview {
+        due_count: 0,
+        upcoming_count: 0,
+        total_enrolled: 0,
+    };
+    for mistake in mistakes {
+        let Some(state) = mistake.review_state.as_ref() else {
+            continue;
+        };
+        result.total_enrolled += 1;
+        let Some(next) = DateTime::parse_from_rfc3339(&state.next_review_date)
+            .ok()
+            .map(|date| date.with_timezone(&Utc))
+        else {
+            continue;
+        };
+        if next <= now {
+            result.due_count += 1;
+        } else if next <= upcoming_cutoff {
+            result.upcoming_count += 1;
+        }
+    }
+    result
+}
+
+fn activity_streak(points: &[DailyTrendPoint], today: chrono::NaiveDate) -> i64 {
+    let active: HashSet<_> = points
+        .iter()
+        .filter(|point| point.activity_points > 0)
+        .filter_map(|point| chrono::NaiveDate::parse_from_str(&point.date, "%Y-%m-%d").ok())
+        .collect();
+    let mut cursor = today;
+    if !active.contains(&cursor) {
+        cursor -= Duration::days(1);
+    }
+    let mut streak = 0;
+    while active.contains(&cursor) {
+        streak += 1;
+        cursor -= Duration::days(1);
+    }
+    streak
+}
+
+pub fn learning_trends(
+    now: DateTime<Utc>,
+    range_days: u32,
+    diaries: &[DiaryEntry],
+    grades: &[Grade],
+    subjects: &[Subject],
+    mistakes: &[MistakeNoteFull],
+    sessions: &[StudySession],
+) -> TrendsSnapshot {
+    let days = range_days.clamp(1, 90) as i64;
+    let end = now.date_naive();
+    let start = end - Duration::days(days - 1);
+    let subject_map: HashMap<_, _> = subjects
+        .iter()
+        .map(|subject| (subject.name.clone(), subject))
+        .collect();
+
+    let mut daily: BTreeMap<chrono::NaiveDate, DailyTrendPoint> = (0..days)
+        .map(|offset| {
+            let date = start + Duration::days(offset);
+            (
+                date,
+                DailyTrendPoint {
+                    date: date.to_string(),
+                    study_minutes: 0,
+                    activity_points: 0,
+                    completed_session_count: 0,
+                    review_count: 0,
+                    grade_count: 0,
+                    mood_score: None,
+                    energy_score: None,
+                },
+            )
+        })
+        .collect();
+    let mut diary_scores: HashMap<chrono::NaiveDate, Vec<(i64, i64)>> = HashMap::new();
+
+    for diary in diaries {
+        let Some(day) = date_key(&diary.date) else {
+            continue;
+        };
+        if let Some(scores) = diary_scores.get_mut(&day) {
+            scores.push((diary.mood_score, diary.energy_score));
+        } else if daily.contains_key(&day) {
+            diary_scores.insert(day, vec![(diary.mood_score, diary.energy_score)]);
+        }
+    }
+    for session in sessions
+        .iter()
+        .filter(|session| session.completed && session.duration_seconds > 0)
+    {
+        let Some(day) = date_key(&session.start_date) else {
+            continue;
+        };
+        let Some(point) = daily.get_mut(&day) else {
+            continue;
+        };
+        point.study_minutes += session.duration_seconds / 60;
+        point.completed_session_count += 1;
+    }
+    for grade in grades {
+        let Some(day) = date_key(&grade.date) else {
+            continue;
+        };
+        if let Some(point) = daily.get_mut(&day) {
+            point.grade_count += 1;
+        }
+    }
+    for mistake in mistakes {
+        for history in &mistake.mastery_history {
+            let Some(day) = date_key(&history.timestamp) else {
+                continue;
+            };
+            if let Some(point) = daily.get_mut(&day) {
+                point.review_count += 1;
+            }
+        }
+    }
+    for (day, scores) in diary_scores {
+        if let Some(point) = daily.get_mut(&day) {
+            let count = scores.len() as f64;
+            point.mood_score =
+                Some(scores.iter().map(|(mood, _)| *mood as f64).sum::<f64>() / count);
+            point.energy_score =
+                Some(scores.iter().map(|(_, energy)| *energy as f64).sum::<f64>() / count);
+        }
+    }
+    let mut daily_points: Vec<_> = daily.into_values().collect();
+    for point in &mut daily_points {
+        point.activity_points =
+            point.study_minutes + point.review_count as i64 + point.grade_count as i64 * 5;
+    }
+
+    let mut grade_groups: HashMap<String, Vec<&Grade>> = HashMap::new();
+    for grade in grades {
+        if date_key(&grade.date).is_some_and(|day| day >= start && day <= end) {
+            grade_groups
+                .entry(grade.subject.clone())
+                .or_default()
+                .push(grade);
+        }
+    }
+    let due = due_mistakes(mistakes, now);
+    let mut subjects_result = Vec::new();
+    for (subject, mut values) in grade_groups {
+        values.sort_by_key(|grade| date_key(&grade.date));
+        let rates: Vec<_> = values
+            .iter()
+            .map(|grade| score_rate(grade, &subject_map))
+            .collect();
+        let average = rates.iter().sum::<f64>() / rates.len() as f64;
+        let recent: Vec<_> = rates.iter().rev().take(3).copied().collect();
+        let first = recent.last().copied().unwrap_or(average);
+        let last = recent.first().copied().unwrap_or(average);
+        let change = last - first;
+        let trend = if change > 0.05 {
+            "rising"
+        } else if change < -0.05 {
+            "falling"
+        } else {
+            "steady"
+        };
+        let rankings: Vec<_> = values.iter().filter_map(|grade| grade.ranking).collect();
+        let subject_mistakes: Vec<_> = mistakes
+            .iter()
+            .filter(|mistake| {
+                mistake.subject == subject
+                    && date_key(&mistake.date).is_some_and(|day| day >= start && day <= end)
+            })
+            .collect();
+        let due_mistakes = due
+            .iter()
+            .filter(|mistake| mistake.subject == subject)
+            .count();
+        subjects_result.push(SubjectTrend {
+            display_name: subject_map
+                .get(&subject)
+                .map(|value| value.display_name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| subject.clone()),
+            subject,
+            average_score_rate: average,
+            latest_score_rate: *rates.last().unwrap_or(&average),
+            average_ranking: (!rankings.is_empty())
+                .then(|| rankings.iter().sum::<i64>() as f64 / rankings.len() as f64),
+            latest_ranking: values.iter().rev().find_map(|grade| grade.ranking),
+            grade_count: values.len(),
+            mistake_count: subject_mistakes.len(),
+            due_mistake_count: due_mistakes,
+            trend: trend.into(),
+            needs_attention: recent.len() >= 2
+                && (recent.iter().sum::<f64>() / (recent.len() as f64) < 0.7 || change < -0.15),
+        });
+    }
+    subjects_result.sort_by(|left, right| left.subject.cmp(&right.subject));
+    let mood_values: Vec<_> = daily_points
+        .iter()
+        .filter_map(|point| point.mood_score)
+        .collect();
+    let energy_values: Vec<_> = daily_points
+        .iter()
+        .filter_map(|point| point.energy_score)
+        .collect();
+    let srs = srs_overview(mistakes, now);
+    TrendsSnapshot {
+        start_date: start.to_string(),
+        end_date: end.to_string(),
+        active_days: daily_points
+            .iter()
+            .filter(|point| point.activity_points > 0)
+            .count(),
+        current_streak: activity_streak(&daily_points, end),
+        total_study_minutes: daily_points.iter().map(|point| point.study_minutes).sum(),
+        average_mood: (!mood_values.is_empty())
+            .then(|| mood_values.iter().sum::<f64>() / mood_values.len() as f64),
+        average_energy: (!energy_values.is_empty())
+            .then(|| energy_values.iter().sum::<f64>() / energy_values.len() as f64),
+        daily_points,
+        subjects: subjects_result,
+        srs,
+    }
 }
 
 /// SM-2 compatible review update matching the iOS quality values 1/3/4/5.
@@ -280,6 +575,75 @@ pub fn today_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn diary(date: &str, mood: i64, energy: i64) -> DiaryEntry {
+        serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(),
+            "date": date,
+            "moodScore": mood,
+            "energyScore": energy,
+            "createdAt": date,
+            "updatedAt": date,
+        }))
+        .unwrap()
+    }
+
+    fn grade(subject: &str, score: f64, date: &str, ranking: i64) -> Grade {
+        serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(),
+            "subject": subject,
+            "score": score,
+            "fullScore": 100.0,
+            "ranking": ranking,
+            "date": date,
+        }))
+        .unwrap()
+    }
+
+    fn mistake(subject: &str, next_review_date: &str, review_timestamp: &str) -> MistakeNoteFull {
+        serde_json::from_value(json!({
+            "id": uuid::Uuid::new_v4(),
+            "title": "A mistake",
+            "subject": subject,
+            "originalQuestion": "Question",
+            "date": review_timestamp,
+            "errorReason": "Reason",
+            "wrongSolution": "Wrong",
+            "correctSolution": "Correct",
+            "reviewState": {
+                "repetitions": 1,
+                "easeFactor": 2.5,
+                "intervalDays": 1,
+                "nextReviewDate": next_review_date,
+                "lastReviewDate": review_timestamp,
+                "lapses": 0,
+            },
+            "masteryHistory": [{
+                "id": uuid::Uuid::new_v4(),
+                "timestamp": review_timestamp,
+                "score": 0.5,
+                "quality": 3,
+            }],
+        }))
+        .unwrap()
+    }
+
+    fn session(start_date: &str, duration_seconds: i64) -> StudySession {
+        StudySession {
+            id: uuid::Uuid::new_v4(),
+            start_date: start_date.into(),
+            duration_seconds,
+            intensity: crate::SessionIntensity::Steady,
+            completed: true,
+            heart_rate_samples: None,
+            difficulty_annotations: None,
+            investment_target: None,
+            source: crate::StudySessionSource::Timer,
+            time_zone_identifier: None,
+            extra: Default::default(),
+        }
+    }
 
     #[test]
     fn srs_again_resets_and_good_grows_interval() {
@@ -329,5 +693,72 @@ mod tests {
             },
         ];
         assert_eq!(current_streak(&sessions, now), 2);
+    }
+
+    #[test]
+    fn trends_average_same_day_diaries_and_apply_activity_weights() {
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let snapshot = learning_trends(
+            now,
+            3,
+            &[
+                diary("2026-07-31T08:00:00Z", 2, 4),
+                diary("2026-07-31T18:00:00Z", 4, 2),
+            ],
+            &[grade("Math", 80.0, "2026-07-31T09:00:00Z", 3)],
+            &[],
+            &[],
+            &[session("2026-07-31T10:00:00Z", 90 * 60)],
+        );
+        let today = snapshot.daily_points.last().unwrap();
+        assert_eq!(snapshot.start_date, "2026-07-29");
+        assert_eq!(snapshot.end_date, "2026-07-31");
+        assert_eq!(today.study_minutes, 90);
+        assert_eq!(today.grade_count, 1);
+        assert_eq!(today.activity_points, 95);
+        assert_eq!(today.mood_score, Some(3.0));
+        assert_eq!(today.energy_score, Some(3.0));
+        assert_eq!(snapshot.active_days, 1);
+    }
+
+    #[test]
+    fn trends_subject_direction_and_srs_counts_are_scoped() {
+        let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let snapshot = learning_trends(
+            now,
+            30,
+            &[],
+            &[
+                grade("Math", 50.0, "2026-07-05T09:00:00Z", 8),
+                grade("Math", 85.0, "2026-07-30T09:00:00Z", 3),
+            ],
+            &[],
+            &[
+                mistake("Math", "2026-07-30T00:00:00Z", "2026-07-30T08:00:00Z"),
+                mistake("Math", "2026-08-03T00:00:00Z", "2026-07-29T08:00:00Z"),
+            ],
+            &[],
+        );
+        assert_eq!(snapshot.srs.total_enrolled, 2);
+        assert_eq!(snapshot.srs.due_count, 1);
+        assert_eq!(snapshot.srs.upcoming_count, 1);
+        let subject = &snapshot.subjects[0];
+        assert_eq!(subject.trend, "rising");
+        assert!(subject.needs_attention);
+        assert_eq!(subject.latest_ranking, Some(3));
+        assert_eq!(subject.average_ranking, Some(5.5));
+        assert_eq!(subject.due_mistake_count, 1);
+    }
+
+    #[test]
+    fn diary_validation_rejects_invalid_score_and_date() {
+        let invalid_score = diary("2026-07-31T00:00:00Z", 6, 3);
+        assert!(invalid_score.validate().is_err());
+        let invalid_date = diary("not-a-date", 3, 3);
+        assert!(invalid_date.validate().is_err());
     }
 }

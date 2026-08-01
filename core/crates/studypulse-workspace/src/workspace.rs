@@ -13,10 +13,10 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    AgentNotebook, ComprehensiveExamFull, ExamFull, FileEntry, GoalReward, Grade, IosRecord,
-    MistakeNoteFull, Result, Routine, RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase,
-    StudySession, SubTask, Subject, TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo,
-    platform::is_link_like, safe_path::ensure_no_symlink_components,
+    AgentNotebook, ComprehensiveExamFull, DiaryEntry, ExamFull, FileEntry, GoalReward, Grade,
+    IosRecord, MistakeNoteFull, Result, Routine, RoutineInstance, SafeRelativePath, SearchMatch,
+    StudyPhase, StudySession, SubTask, Subject, TaskItem, TimeInvestmentSubject, WorkspaceError,
+    WorkspaceInfo, platform::is_link_like, safe_path::ensure_no_symlink_components,
 };
 
 const WORKSPACE_SCHEMA_VERSION: u32 = 1;
@@ -535,6 +535,23 @@ impl Workspace {
         self.delete_jsonl_record::<MistakeNoteFull>("Data/mistakes.jsonl", id)
     }
 
+    pub fn read_diary_entries(&self) -> Result<Vec<DiaryEntry>> {
+        let values: Vec<DiaryEntry> = self.read_jsonl_records("Data/diary_entries.jsonl")?;
+        for value in &values {
+            value.validate()?;
+        }
+        Ok(values)
+    }
+
+    pub fn upsert_diary_entry(&self, value: DiaryEntry) -> Result<()> {
+        value.validate()?;
+        self.upsert_jsonl_record("Data/diary_entries.jsonl", value, |entry| entry.id)
+    }
+
+    pub fn delete_diary_entry(&self, id: Uuid) -> Result<()> {
+        self.delete_jsonl_record::<DiaryEntry>("Data/diary_entries.jsonl", id)
+    }
+
     pub fn read_exams(&self) -> Result<Vec<ExamFull>> {
         self.read_jsonl_records("Data/exams.jsonl")
     }
@@ -961,6 +978,31 @@ mod tests {
         };
         workspace.append_task(task.clone()).unwrap();
         assert_eq!(workspace.read_tasks().unwrap(), vec![task]);
+    }
+
+    #[test]
+    fn diary_jsonl_round_trip_preserves_unknown_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let id = Uuid::new_v4();
+        let mut extra = BTreeMap::new();
+        extra.insert("iosOnlyField".into(), serde_json::json!({ "kept": true }));
+        let entry = DiaryEntry {
+            id,
+            date: "2026-07-31T00:00:00Z".into(),
+            mood_score: 4,
+            energy_score: 2,
+            energy_tag: "focused".into(),
+            content: "## Review\n\nWorked through algebra.".into(),
+            phase_id: None,
+            created_at: "2026-07-31T08:00:00Z".into(),
+            updated_at: "2026-07-31T09:00:00Z".into(),
+            extra,
+        };
+        workspace.upsert_diary_entry(entry.clone()).unwrap();
+        assert_eq!(workspace.read_diary_entries().unwrap(), vec![entry]);
+        workspace.delete_diary_entry(id).unwrap();
+        assert!(workspace.read_diary_entries().unwrap().is_empty());
     }
 
     #[cfg(unix)]
