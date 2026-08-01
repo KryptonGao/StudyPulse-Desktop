@@ -190,6 +190,64 @@ const fn default_dto_version() -> u32 {
     1
 }
 
+/// A daily reflection entry compatible with the iOS `DiaryEntry` payload.
+/// Multiple entries may share the same calendar date; analytics aggregates
+/// their mood and energy values per day.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiaryEntry {
+    pub id: Uuid,
+    pub date: String,
+    #[serde(default = "default_diary_score")]
+    pub mood_score: i64,
+    #[serde(default = "default_diary_score")]
+    pub energy_score: i64,
+    #[serde(default)]
+    pub energy_tag: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub phase_id: Option<Uuid>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+const fn default_diary_score() -> i64 {
+    3
+}
+
+impl DiaryEntry {
+    pub fn validate(&self) -> crate::Result<()> {
+        if !(1..=5).contains(&self.mood_score) {
+            return Err(crate::WorkspaceError::MalformedData {
+                path: "Data/diary_entries.jsonl".into(),
+                detail: "moodScore must be between 1 and 5".into(),
+            });
+        }
+        if !(1..=5).contains(&self.energy_score) {
+            return Err(crate::WorkspaceError::MalformedData {
+                path: "Data/diary_entries.jsonl".into(),
+                detail: "energyScore must be between 1 and 5".into(),
+            });
+        }
+        for (field, value) in [
+            ("date", &self.date),
+            ("createdAt", &self.created_at),
+            ("updatedAt", &self.updated_at),
+        ] {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
+                crate::WorkspaceError::MalformedData {
+                    path: "Data/diary_entries.jsonl".into(),
+                    detail: format!("invalid {field}: {error}"),
+                }
+            })?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MistakeNote {

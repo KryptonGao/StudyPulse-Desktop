@@ -6,8 +6,9 @@ mod safe_path;
 mod workspace;
 
 pub use analytics::{
-    SrsReviewResult, TimeInvestmentSummary, TodaySnapshot, apply_srs, current_streak, due_mistakes,
-    investment_summary, today_snapshot,
+    DailyTrendPoint, SrsOverview, SrsReviewResult, SubjectTrend, TimeInvestmentSummary,
+    TodaySnapshot, TrendsSnapshot, apply_srs, current_streak, due_mistakes, investment_summary,
+    learning_trends, srs_overview, today_snapshot,
 };
 pub use backup::{
     BackupConflict, BackupExportOptions, BackupExportResult, BackupInspection, BackupManifest,
@@ -15,9 +16,9 @@ pub use backup::{
 };
 pub use models::{
     AgentMessage, AgentMessageRole, AgentNotebook, ComprehensiveExam, ComprehensiveExamFull,
-    DifficultyAnnotation, Exam, ExamChecklistItem, ExamFull, ExamReview, ExamTimeSlot, FileEntry,
-    GoalReward, Grade, HandwritingAnswerEntry, HeartRateSample, InvestmentTarget, IosRecord,
-    MasteryHistoryEntry, MistakeNote, MistakeNoteFull, PhaseGoal, ReviewState, Routine,
+    DiaryEntry, DifficultyAnnotation, Exam, ExamChecklistItem, ExamFull, ExamReview, ExamTimeSlot,
+    FileEntry, GoalReward, Grade, HandwritingAnswerEntry, HeartRateSample, InvestmentTarget,
+    IosRecord, MasteryHistoryEntry, MistakeNote, MistakeNoteFull, PhaseGoal, ReviewState, Routine,
     RoutineInstance, RoutineType, SearchMatch, SessionIntensity, StudyPhase, StudySession,
     StudySessionSource, SubTask, Subject, TaskItem, TaskType, TimeInvestmentSubject,
     TimeInvestmentTheme, WorkspaceInfo,

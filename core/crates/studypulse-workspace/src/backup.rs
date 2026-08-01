@@ -13,8 +13,8 @@ use walkdir::WalkDir;
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    ComprehensiveExamFull, ExamFull, IosRecord, MistakeNoteFull, Result, TaskItem, Workspace,
-    WorkspaceError, validate_wire_relative_path,
+    ComprehensiveExamFull, DiaryEntry, ExamFull, IosRecord, MistakeNoteFull, Result, TaskItem,
+    Workspace, WorkspaceError, validate_wire_relative_path,
 };
 
 const FORMAT_IDENTIFIER: &str = "com.chenkai.gao.studypulse.backup";
@@ -753,6 +753,12 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
                 .ok_or_else(|| "envelope id mismatch".into())
         },
     )?;
+    validate_typed_jsonl::<DiaryEntry>(&staging.join("data/diary_entries.jsonl"), |record| {
+        if record.id != record.value.id {
+            return Err("envelope id mismatch".into());
+        }
+        record.value.validate().map_err(|error| error.to_string())
+    })?;
 
     for entry in fs::read_dir(staging.join("data"))? {
         let entry = entry?;

@@ -18,13 +18,13 @@ use studypulse_model_client::{
 use studypulse_tools::PermissionLevel;
 use studypulse_workspace::{
     AgentMessage, AgentMessageRole, AgentNotebook, BackupExportOptions, BackupInspection,
-    BackupResolution, ComprehensiveExamFull, DifficultyAnnotation, ExamChecklistItem, ExamFull,
-    ExamReview, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
+    BackupResolution, ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem,
+    ExamFull, ExamReview, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
     HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull,
     PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SearchMatch,
     SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem,
     TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme, TodaySnapshot,
-    Workspace, WorkspaceInfo,
+    TrendsSnapshot, Workspace, WorkspaceInfo,
 };
 use thiserror::Error;
 
@@ -147,6 +147,20 @@ pub struct GradeDto {
     pub exam_id: Option<String>,
     pub full_score: Option<f64>,
     pub phase_id: Option<String>,
+    pub extra_json: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct DiaryEntryDto {
+    pub id: String,
+    pub date: String,
+    pub mood_score: i64,
+    pub energy_score: i64,
+    pub energy_tag: String,
+    pub content: String,
+    pub phase_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
     pub extra_json: String,
 }
 
@@ -434,6 +448,54 @@ pub struct TodaySnapshotDto {
 pub struct SrsReviewResultDto {
     pub state: ReviewStateDto,
     pub next_review_date: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct SrsOverviewDto {
+    pub due_count: u64,
+    pub upcoming_count: u64,
+    pub total_enrolled: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct DailyTrendPointDto {
+    pub date: String,
+    pub study_minutes: i64,
+    pub activity_points: i64,
+    pub completed_session_count: u64,
+    pub review_count: u64,
+    pub grade_count: u64,
+    pub mood_score: Option<f64>,
+    pub energy_score: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct SubjectTrendDto {
+    pub subject: String,
+    pub display_name: String,
+    pub average_score_rate: f64,
+    pub latest_score_rate: f64,
+    pub average_ranking: Option<f64>,
+    pub latest_ranking: Option<i64>,
+    pub grade_count: u64,
+    pub mistake_count: u64,
+    pub due_mistake_count: u64,
+    pub trend: String,
+    pub needs_attention: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct TrendsSnapshotDto {
+    pub start_date: String,
+    pub end_date: String,
+    pub active_days: u64,
+    pub current_streak: i64,
+    pub total_study_minutes: i64,
+    pub average_mood: Option<f64>,
+    pub average_energy: Option<f64>,
+    pub daily_points: Vec<DailyTrendPointDto>,
+    pub subjects: Vec<SubjectTrendDto>,
+    pub srs: SrsOverviewDto,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
@@ -1046,6 +1108,25 @@ impl StudyPulseCore {
             .map_err(CoreError::message)
     }
 
+    pub fn get_diary_entries(&self) -> Result<Vec<DiaryEntryDto>, CoreError> {
+        self.workspace()?
+            .read_diary_entries()
+            .map(|values| values.into_iter().map(Into::into).collect())
+            .map_err(CoreError::message)
+    }
+
+    pub fn upsert_diary_entry(&self, value: DiaryEntryDto) -> Result<(), CoreError> {
+        self.workspace()?
+            .upsert_diary_entry(value.try_into()?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn delete_diary_entry(&self, id: String) -> Result<(), CoreError> {
+        self.workspace()?
+            .delete_diary_entry(parse_uuid(&id)?)
+            .map_err(CoreError::message)
+    }
+
     pub fn get_due_mistakes(&self) -> Result<Vec<MistakeNoteDto>, CoreError> {
         let values = self
             .workspace()?
@@ -1076,6 +1157,11 @@ impl StudyPulseCore {
         id: String,
         quality: i64,
     ) -> Result<SrsReviewResultDto, CoreError> {
+        if !matches!(quality, 1 | 3 | 4 | 5) {
+            return Err(CoreError::message(
+                "review quality must be one of 1, 3, 4, or 5",
+            ));
+        }
         let workspace = self.workspace()?;
         let mistake_id = parse_uuid(&id)?;
         let mut mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
@@ -1112,6 +1198,39 @@ impl StudyPulseCore {
             .upsert_mistake(mistake.clone())
             .map_err(CoreError::message)?;
         Ok(review.into())
+    }
+
+    pub fn enroll_mistake(&self, id: String) -> Result<ReviewStateDto, CoreError> {
+        let workspace = self.workspace()?;
+        let mistake_id = parse_uuid(&id)?;
+        let mut mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
+        let mistake = mistakes
+            .iter_mut()
+            .find(|value| value.id == mistake_id)
+            .ok_or_else(|| CoreError::message(format!("mistake UUID not found: {id}")))?;
+        if mistake.review_state.is_none() {
+            let now = chrono::Utc::now();
+            mistake.review_state = Some(ReviewState {
+                repetitions: 0,
+                ease_factor: 2.5,
+                interval_days: 0,
+                // Enrolling is an explicit request to make the mistake available
+                // in the next flashcard session; the first interval starts after
+                // the first rating.
+                next_review_date: now.to_rfc3339(),
+                last_review_date: None,
+                lapses: 0,
+                extra: BTreeMap::new(),
+            });
+            workspace
+                .upsert_mistake(mistake.clone())
+                .map_err(CoreError::message)?;
+        }
+        Ok(mistake
+            .review_state
+            .clone()
+            .expect("state was checked")
+            .into())
     }
 
     pub fn get_exams(&self) -> Result<Vec<ExamDto>, CoreError> {
@@ -1281,6 +1400,22 @@ impl StudyPulseCore {
                 .map_err(CoreError::message)?,
         );
         Ok(summaries.into_iter().map(Into::into).collect())
+    }
+
+    pub fn get_learning_trends(&self, range_days: i64) -> Result<TrendsSnapshotDto, CoreError> {
+        let workspace = self.workspace()?;
+        let snapshot = studypulse_workspace::learning_trends(
+            chrono::Utc::now(),
+            range_days.clamp(1, 90) as u32,
+            &workspace.read_diary_entries().map_err(CoreError::message)?,
+            &workspace.read_grades().map_err(CoreError::message)?,
+            &workspace.read_subjects().map_err(CoreError::message)?,
+            &workspace.read_mistakes().map_err(CoreError::message)?,
+            &workspace
+                .read_study_sessions()
+                .map_err(CoreError::message)?,
+        );
+        Ok(snapshot.into())
     }
 
     pub fn get_today_snapshot(&self) -> Result<TodaySnapshotDto, CoreError> {
@@ -1898,6 +2033,42 @@ impl TryFrom<GradeDto> for Grade {
             exam_id: parse_optional_uuid(value.exam_id)?,
             full_score: value.full_score,
             phase_id: parse_optional_uuid(value.phase_id)?,
+            extra: decode_extra(&value.extra_json)?,
+        })
+    }
+}
+
+impl From<DiaryEntry> for DiaryEntryDto {
+    fn from(value: DiaryEntry) -> Self {
+        Self {
+            id: value.id.to_string(),
+            date: value.date,
+            mood_score: value.mood_score,
+            energy_score: value.energy_score,
+            energy_tag: value.energy_tag,
+            content: value.content,
+            phase_id: value.phase_id.map(|id| id.to_string()),
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            extra_json: encode_extra(&value.extra),
+        }
+    }
+}
+
+impl TryFrom<DiaryEntryDto> for DiaryEntry {
+    type Error = CoreError;
+
+    fn try_from(value: DiaryEntryDto) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: parse_uuid(&value.id)?,
+            date: value.date,
+            mood_score: value.mood_score,
+            energy_score: value.energy_score,
+            energy_tag: value.energy_tag,
+            content: value.content,
+            phase_id: parse_optional_uuid(value.phase_id)?,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
             extra: decode_extra(&value.extra_json)?,
         })
     }
@@ -2681,6 +2852,66 @@ impl From<TodaySnapshot> for TodaySnapshotDto {
     }
 }
 
+impl From<studypulse_workspace::SrsOverview> for SrsOverviewDto {
+    fn from(value: studypulse_workspace::SrsOverview) -> Self {
+        Self {
+            due_count: value.due_count as u64,
+            upcoming_count: value.upcoming_count as u64,
+            total_enrolled: value.total_enrolled as u64,
+        }
+    }
+}
+
+impl From<studypulse_workspace::DailyTrendPoint> for DailyTrendPointDto {
+    fn from(value: studypulse_workspace::DailyTrendPoint) -> Self {
+        Self {
+            date: value.date,
+            study_minutes: value.study_minutes,
+            activity_points: value.activity_points,
+            completed_session_count: value.completed_session_count as u64,
+            review_count: value.review_count as u64,
+            grade_count: value.grade_count as u64,
+            mood_score: value.mood_score,
+            energy_score: value.energy_score,
+        }
+    }
+}
+
+impl From<studypulse_workspace::SubjectTrend> for SubjectTrendDto {
+    fn from(value: studypulse_workspace::SubjectTrend) -> Self {
+        Self {
+            subject: value.subject,
+            display_name: value.display_name,
+            average_score_rate: value.average_score_rate,
+            latest_score_rate: value.latest_score_rate,
+            average_ranking: value.average_ranking,
+            latest_ranking: value.latest_ranking,
+            grade_count: value.grade_count as u64,
+            mistake_count: value.mistake_count as u64,
+            due_mistake_count: value.due_mistake_count as u64,
+            trend: value.trend,
+            needs_attention: value.needs_attention,
+        }
+    }
+}
+
+impl From<TrendsSnapshot> for TrendsSnapshotDto {
+    fn from(value: TrendsSnapshot) -> Self {
+        Self {
+            start_date: value.start_date,
+            end_date: value.end_date,
+            active_days: value.active_days as u64,
+            current_streak: value.current_streak,
+            total_study_minutes: value.total_study_minutes,
+            average_mood: value.average_mood,
+            average_energy: value.average_energy,
+            daily_points: value.daily_points.into_iter().map(Into::into).collect(),
+            subjects: value.subjects.into_iter().map(Into::into).collect(),
+            srs: value.srs.into(),
+        }
+    }
+}
+
 impl From<studypulse_workspace::SrsReviewResult> for SrsReviewResultDto {
     fn from(value: studypulse_workspace::SrsReviewResult) -> Self {
         Self {
@@ -3011,5 +3242,66 @@ mod tests {
             }
         }
         assert_eq!(core.get_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn p1_diary_srs_and_trends_round_trip_through_facade() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = StudyPulseCore::new();
+        core.create_workspace(temp.path().join("Workspace").to_string_lossy().into_owned())
+            .unwrap();
+        let now = "2026-07-31T00:00:00Z".to_string();
+        let diary_id = uuid::Uuid::new_v4().to_string();
+        core.upsert_diary_entry(DiaryEntryDto {
+            id: diary_id.clone(),
+            date: now.clone(),
+            mood_score: 4,
+            energy_score: 3,
+            energy_tag: "focused".into(),
+            content: "A short note".into(),
+            phase_id: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            extra_json: r#"{"futureField":true}"#.into(),
+        })
+        .unwrap();
+        assert_eq!(core.get_diary_entries().unwrap()[0].id, diary_id);
+
+        let mistake_id = uuid::Uuid::new_v4().to_string();
+        core.upsert_mistake(MistakeNoteDto {
+            id: mistake_id.clone(),
+            title: "Fractions".into(),
+            subject: "Math".into(),
+            original_question: "1/2 + 1/3".into(),
+            source: "Manual".into(),
+            date: now,
+            error_reason: "Skipped the common denominator".into(),
+            wrong_solution: "2/5".into(),
+            correct_solution: "5/6".into(),
+            question_images: Vec::new(),
+            reason_images: Vec::new(),
+            wrong_solution_images: Vec::new(),
+            correct_solution_images: Vec::new(),
+            review_state: None,
+            phase_id: None,
+            exposure_count: 0,
+            mastery_score: 0.0,
+            mastery_history: Vec::new(),
+            handwriting_history: Vec::new(),
+            difficulty: 3,
+            tags: Vec::new(),
+            audio_file_name: None,
+            extra_json: "{}".into(),
+        })
+        .unwrap();
+        let enrolled = core.enroll_mistake(mistake_id.clone()).unwrap();
+        assert_eq!(enrolled.repetitions, 0);
+        assert_eq!(core.get_due_mistakes().unwrap().len(), 1);
+        let reviewed = core.review_mistake(mistake_id, 5).unwrap();
+        assert_eq!(reviewed.state.repetitions, 1);
+        let trends = core.get_learning_trends(7).unwrap();
+        assert_eq!(trends.srs.total_enrolled, 1);
+        assert_eq!(trends.srs.due_count, 0);
+        assert_eq!(trends.daily_points.len(), 7);
     }
 }

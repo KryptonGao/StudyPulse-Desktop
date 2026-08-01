@@ -120,6 +120,29 @@ export interface Grade {
   extra_json: string;
 }
 
+export interface DiaryEntry {
+  id: string;
+  date: string;
+  mood_score: number;
+  energy_score: number;
+  energy_tag: string;
+  content: string;
+  phase_id: string | null;
+  created_at: string;
+  updated_at: string;
+  extra_json: string;
+}
+
+export interface ReviewState {
+  repetitions: number;
+  ease_factor: number;
+  interval_days: number;
+  next_review_date: string;
+  last_review_date: string | null;
+  lapses: number;
+  extra_json: string;
+}
+
 export interface MistakeNote {
   id: string;
   title: string;
@@ -134,7 +157,7 @@ export interface MistakeNote {
   reason_images: string[];
   wrong_solution_images: string[];
   correct_solution_images: string[];
-  review_state: unknown;
+  review_state: ReviewState | null;
   phase_id: string | null;
   exposure_count: number;
   mastery_score: number;
@@ -189,6 +212,55 @@ export interface TodaySnapshot {
   streak_days: number;
   assigned_investment_seconds: number;
   suggestions: string[];
+}
+
+export interface SrsOverview {
+  due_count: number;
+  upcoming_count: number;
+  total_enrolled: number;
+}
+
+export interface DailyTrendPoint {
+  date: string;
+  study_minutes: number;
+  activity_points: number;
+  completed_session_count: number;
+  review_count: number;
+  grade_count: number;
+  mood_score: number | null;
+  energy_score: number | null;
+}
+
+export interface SubjectTrend {
+  subject: string;
+  display_name: string;
+  average_score_rate: number;
+  latest_score_rate: number;
+  average_ranking: number | null;
+  latest_ranking: number | null;
+  grade_count: number;
+  mistake_count: number;
+  due_mistake_count: number;
+  trend: "rising" | "falling" | "steady" | string;
+  needs_attention: boolean;
+}
+
+export interface TrendsSnapshot {
+  start_date: string;
+  end_date: string;
+  active_days: number;
+  current_streak: number;
+  total_study_minutes: number;
+  average_mood: number | null;
+  average_energy: number | null;
+  daily_points: DailyTrendPoint[];
+  subjects: SubjectTrend[];
+  srs: SrsOverview;
+}
+
+export interface SrsReviewResult {
+  state: ReviewState;
+  next_review_date: string;
 }
 
 export type TimerStatus = "Idle" | "Running" | "Paused";

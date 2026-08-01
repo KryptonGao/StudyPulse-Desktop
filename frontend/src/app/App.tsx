@@ -7,8 +7,9 @@ import remarkGfm from "remark-gfm";
 import { core, chooseBackupExportPath, chooseBackupToInspect, chooseDirectory, chooseSourceFiles, chooseWorkspaceToCreate, isDesktop } from "../lib/core";
 import { languageLocale, localizeEnum, useI18n, type Translate } from "../i18n";
 import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AppSnapshot, Exam, Grade, SessionIntensity, TimeInvestmentSubject } from "../types";
+import { DiaryPage, FlashcardsPage, TrendsPage } from "./P1Pages";
 
-type Page = "today" | "agent" | "tasks" | "subjects" | "exams" | "mistakes" | "timer" | "investment" | "library" | "settings";
+type Page = "today" | "agent" | "tasks" | "subjects" | "exams" | "mistakes" | "diary" | "trends" | "flashcards" | "timer" | "investment" | "library" | "settings";
 
 const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: string }[] = [
   { id: "today", labelKey: "nav.today", icon: "✦" },
@@ -17,6 +18,9 @@ const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: strin
   { id: "subjects", labelKey: "nav.subjects", icon: "◫" },
   { id: "exams", labelKey: "nav.exams", icon: "◷" },
   { id: "mistakes", labelKey: "nav.mistakes", icon: "!" },
+  { id: "diary", labelKey: "nav.diary", icon: "◒" },
+  { id: "trends", labelKey: "nav.trends", icon: "⌁" },
+  { id: "flashcards", labelKey: "nav.flashcards", icon: "▣" },
   { id: "timer", labelKey: "nav.timer", icon: "◴" },
   { id: "investment", labelKey: "nav.investment", icon: "▥" },
   { id: "library", labelKey: "nav.library", icon: "▤" },
@@ -169,6 +173,9 @@ export default function App() {
         {page === "subjects" && <SubjectsPage />}
         {page === "exams" && <ExamsPage />}
         {page === "mistakes" && <MistakesPage />}
+        {page === "diary" && <DiaryPage />}
+        {page === "trends" && <TrendsPage />}
+        {page === "flashcards" && <FlashcardsPage />}
         {page === "timer" && <TimerPage />}
         {page === "investment" && <InvestmentPage />}
         {page === "library" && <LibraryPage />}
@@ -305,7 +312,8 @@ function MistakesPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["mistakes"], queryFn: core.mistakes });
-  const review = useMutation({ mutationFn: ({ id, quality }: { id: string; quality: number }) => core.reviewMistake(id, quality), onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mistakes"] }) });
+  const review = useMutation({ mutationFn: ({ id, quality }: { id: string; quality: number }) => core.reviewMistake(id, quality), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["mistakes"] }); void queryClient.invalidateQueries({ queryKey: ["flashcards"] }); void queryClient.invalidateQueries({ queryKey: ["trends"] }); } });
+  const enroll = useMutation({ mutationFn: core.enrollMistake, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["mistakes"] }); void queryClient.invalidateQueries({ queryKey: ["flashcards"] }); void queryClient.invalidateQueries({ queryKey: ["trends"] }); } });
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState("");
   const [subject, setSubject] = useState("");
@@ -320,7 +328,7 @@ function MistakesPage() {
     if (!trimmedTitle) { window.alert(t("mistakes.validation")); return; }
     addMistake.mutate({ id: crypto.randomUUID(), title: trimmedTitle, subject: subject.trim(), original_question: question.trim(), source: "Manual", date: new Date().toISOString(), error_reason: errorReason.trim(), wrong_solution: "", correct_solution: "", question_images: [], reason_images: [], wrong_solution_images: [], correct_solution_images: [], review_state: null, phase_id: null, exposure_count: 0, mastery_score: 0, mastery_history: [], handwriting_history: [], difficulty: 3, tags: [], audio_file_name: null, extra_json: "{}" });
   }
-  return <div className="page-content"><SectionHeader title={t("mistakes.title")} description={t("mistakes.description")} action={<button className="button primary small" onClick={() => setShowForm((value) => !value)}>{showForm ? t("mistakes.close") : t("mistakes.add")}</button>} />{showForm && <section className="panel mistake-form"><div className="form-grid"><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t("mistakes.titlePlaceholder")} /><input value={subject} onChange={(event) => setSubject(event.target.value)} placeholder={t("mistakes.subjectPlaceholder")} /><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={t("mistakes.questionPlaceholder")} /><textarea value={errorReason} onChange={(event) => setErrorReason(event.target.value)} placeholder={t("mistakes.reasonPlaceholder")} /><button className="button primary small" onClick={saveMistake} disabled={addMistake.isPending}>{addMistake.isPending ? t("tasks.saving") : t("mistakes.save")}</button></div></section>}{mistakes.length ? <div className="record-grid">{mistakes.map((mistake) => <div className="record-card mistake-card" key={mistake.id}><div className="mistake-head"><span className="tag">{mistake.subject || t("today.general")}</span><span>{Math.round(mistake.mastery_score * 100)}% {t("mistakes.mastery")}</span></div><h3>{mistake.title || t("mistakes.untitled")}</h3><p>{mistake.original_question || t("mistakes.noQuestion")}</p><div className="review-actions"><button className="button subtle small" onClick={() => review.mutate({ id: mistake.id, quality: 1 })}>{t("mistakes.again")}</button><button className="button secondary small" onClick={() => review.mutate({ id: mistake.id, quality: 3 })}>{t("mistakes.hard")}</button><button className="button primary small" onClick={() => review.mutate({ id: mistake.id, quality: 4 })}>{t("mistakes.gotIt")}</button></div></div>)}</div> : <div className="panel"><EmptyState title={t("mistakes.none")} copy={t("mistakes.noneCopy")} /></div>}</div>;
+  return <div className="page-content"><SectionHeader title={t("mistakes.title")} description={t("mistakes.description")} action={<button className="button primary small" onClick={() => setShowForm((value) => !value)}>{showForm ? t("mistakes.close") : t("mistakes.add")}</button>} />{showForm && <section className="panel mistake-form"><div className="form-grid"><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={t("mistakes.titlePlaceholder")} /><input value={subject} onChange={(event) => setSubject(event.target.value)} placeholder={t("mistakes.subjectPlaceholder")} /><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={t("mistakes.questionPlaceholder")} /><textarea value={errorReason} onChange={(event) => setErrorReason(event.target.value)} placeholder={t("mistakes.reasonPlaceholder")} /><button className="button primary small" onClick={saveMistake} disabled={addMistake.isPending}>{addMistake.isPending ? t("tasks.saving") : t("mistakes.save")}</button></div></section>}{mistakes.length ? <div className="record-grid">{mistakes.map((mistake) => <div className="record-card mistake-card" key={mistake.id}><div className="mistake-head"><span className="tag">{mistake.subject || t("today.general")}</span><span>{Math.round(mistake.mastery_score * 100)}% {t("mistakes.mastery")}</span></div><h3>{mistake.title || t("mistakes.untitled")}</h3><p>{mistake.original_question || t("mistakes.noQuestion")}</p><div className="review-actions"><button className="button subtle small" onClick={() => review.mutate({ id: mistake.id, quality: 1 })}>{t("mistakes.again")}</button><button className="button secondary small" onClick={() => review.mutate({ id: mistake.id, quality: 3 })}>{t("mistakes.hard")}</button><button className="button primary small" onClick={() => review.mutate({ id: mistake.id, quality: 4 })}>{t("mistakes.gotIt")}</button><button className="button secondary small" onClick={() => review.mutate({ id: mistake.id, quality: 5 })}>{t("mistakes.easy")}</button>{mistake.review_state === null && <button className="button subtle small" onClick={() => enroll.mutate(mistake.id)} disabled={enroll.isPending}>{t("mistakes.enroll")}</button>}</div></div>)}</div> : <div className="panel"><EmptyState title={t("mistakes.none")} copy={t("mistakes.noneCopy")} /></div>}</div>;
 }
 
 function TimerPage() {
