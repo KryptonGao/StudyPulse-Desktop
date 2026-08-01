@@ -1,0 +1,292 @@
+export type TaskType = "Homework" | "Reading";
+export type AgentMode =
+  | "Chat"
+  | "DeepSolve"
+  | "Mastery"
+  | "DeepResearch"
+  | "QuestionLab"
+  | "Visualize";
+export type AgentEventKind =
+  | "Started"
+  | "StatusChanged"
+  | "TextDelta"
+  | "ToolRequested"
+  | "ToolCompleted"
+  | "ConfirmationRequired"
+  | "StageStarted"
+  | "StageProgress"
+  | "StageCompleted"
+  | "InputRequired"
+  | "ArtifactCreated"
+  | "Failed"
+  | "Cancelled"
+  | "Completed";
+export type RunStatus =
+  | "Started"
+  | "Running"
+  | "WaitingForConfirmation"
+  | "Cancelling"
+  | "Failed"
+  | "Cancelled"
+  | "Completed";
+
+export interface Workspace {
+  id: string;
+  root_path: string;
+  schema_version: number;
+}
+
+export interface CloudAccount {
+  email: string;
+  role: string;
+  membership_type: string;
+  membership_expires_at: string | null;
+  plan_name: string;
+  available_models: string[];
+}
+
+export interface ByokConfig {
+  base_url: string;
+  model: string;
+}
+
+export interface ProviderStatus {
+  cloud_account: CloudAccount | null;
+  byok_config: ByokConfig | null;
+  has_saved_byok: boolean;
+  active_provider: "cloud" | "byok" | null;
+}
+
+export interface AppSnapshot {
+  workspace: Workspace | null;
+  provider: ProviderStatus;
+}
+
+export interface Task {
+  id: string;
+  title: string;
+  task_type: TaskType;
+  due_date: string;
+  reminder_date: string;
+  subject: string;
+  importance: number;
+  notes: string;
+  is_completed: boolean;
+  reminder_event_id: string | null;
+  reminder_calendar_id: string | null;
+  created_at: string;
+  phase_id: string | null;
+  coach_execution_data: string | null;
+  coach_goal_id: string | null;
+  coach_proposal_id: string | null;
+  extra_json: string;
+}
+
+export interface Subject {
+  id: string;
+  name: string;
+  enabled: boolean;
+  full_score: number;
+  display_name: string;
+  extra_json: string;
+}
+
+export interface StudyPhase {
+  id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  is_archived: boolean;
+  archived_at: string | null;
+  goals: unknown[];
+  created_at: string;
+  extra_json: string;
+}
+
+export interface Grade {
+  id: string;
+  subject: string;
+  score: number;
+  raw_score: number | null;
+  ranking: number | null;
+  importance: number;
+  image_base64: string | null;
+  image_file_name: string | null;
+  date: string;
+  exam_name: string;
+  exam_id: string | null;
+  full_score: number | null;
+  phase_id: string | null;
+  extra_json: string;
+}
+
+export interface MistakeNote {
+  id: string;
+  title: string;
+  subject: string;
+  original_question: string;
+  source: string;
+  date: string;
+  error_reason: string;
+  wrong_solution: string;
+  correct_solution: string;
+  question_images: string[];
+  reason_images: string[];
+  wrong_solution_images: string[];
+  correct_solution_images: string[];
+  review_state: unknown;
+  phase_id: string | null;
+  exposure_count: number;
+  mastery_score: number;
+  mastery_history: unknown[];
+  handwriting_history: unknown[];
+  difficulty: number;
+  tags: string[];
+  audio_file_name: string | null;
+  extra_json: string;
+}
+
+export interface Exam {
+  id: string;
+  name: string;
+  exam_date: string;
+  exam_end_date: string | null;
+  importance: number;
+  subject: string;
+  exam_name: string;
+  mastery_degree: number;
+  time_slot: unknown;
+  phase_id: string | null;
+  checklist: unknown[];
+  location_school: string;
+  location_classroom: string;
+  location_seat: string;
+  countdown_notify_days: number[] | null;
+  exam_review: unknown;
+  extra_json: string;
+}
+
+export interface FileEntry {
+  relative_path: string;
+  is_directory: boolean;
+  size_bytes: number;
+  modified_at: string | null;
+}
+
+export interface SearchMatch {
+  relative_path: string;
+  line_number: number | null;
+  snippet: string;
+}
+
+export interface TodaySnapshot {
+  open_task_count: number;
+  completed_task_count: number;
+  study_minutes: number;
+  due_mistake_count: number;
+  due_mistake_ids: string[];
+  upcoming_exam_ids: string[];
+  streak_days: number;
+  assigned_investment_seconds: number;
+  suggestions: string[];
+}
+
+export type TimerStatus = "Idle" | "Running" | "Paused";
+export type SessionIntensity = "Peak" | "DeepFocus" | "Steady" | "Light" | "Recovery";
+
+export interface TimerSnapshot {
+  status: TimerStatus;
+  session_id: string | null;
+  started_at: string | null;
+  elapsed_seconds: number;
+  target_duration_seconds: number;
+  intensity: SessionIntensity | null;
+  investment_target: { kind: string; id: string } | null;
+}
+
+export interface StudySession {
+  id: string;
+  start_date: string;
+  duration_seconds: number;
+  intensity: SessionIntensity;
+  completed: boolean;
+  source: "Timer" | "Manual";
+  time_zone_identifier: string | null;
+}
+
+export interface TimeInvestmentSubject {
+  id: string;
+  name: string;
+  symbol_name: string;
+  theme: string;
+  start_date: string;
+  sort_order: number;
+  created_at: string;
+  is_archived: boolean;
+  extra_json: string;
+}
+
+export interface AgentMessage {
+  id: string;
+  role: "User" | "Assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface AgentNotebook {
+  id: string;
+  title: string;
+  source_paths: string[];
+  messages: AgentMessage[];
+  last_goal: string;
+  last_answer: string;
+  updated_at: string;
+}
+
+export interface CapabilityManifest {
+  mode: AgentMode;
+  title: string;
+  description: string;
+  stages: string[];
+  max_loops: number;
+}
+
+export interface AgentEvent {
+  run_id: string;
+  sequence: number;
+  timestamp: string;
+  kind: AgentEventKind;
+  status: RunStatus | null;
+  text: string | null;
+  tool_call_id: string | null;
+  tool_name: string | null;
+  permission: "Read" | "Write" | "Destructive" | "Execute" | null;
+  preview: string | null;
+  confirmation_id: string | null;
+  payload_json: string | null;
+  mode: AgentMode | null;
+  stage: string | null;
+  progress: number | null;
+}
+
+export interface BackupInspection {
+  id: string;
+  schema_version: number;
+  created_at: string;
+  added_records: number;
+  identical_records: number;
+  conflicts: { key: string; domain: string; record_id: string | null; display_name: string }[];
+  warnings: string[];
+}
+
+export interface ImportReport {
+  imported_records: number;
+  kept_local_records: number;
+  recovery_path: string;
+  warnings: string[];
+}
+
+export interface ApiError {
+  kind?: string;
+  message?: string;
+}

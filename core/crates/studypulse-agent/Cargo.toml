@@ -1,0 +1,22 @@
+[package]
+name = "studypulse-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+studypulse-model-client = { path = "../studypulse-model-client" }
+studypulse-tools = { path = "../studypulse-tools" }
+studypulse-workspace = { path = "../studypulse-workspace" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true

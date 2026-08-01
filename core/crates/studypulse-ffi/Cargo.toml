@@ -1,0 +1,29 @@
+[package]
+name = "studypulse-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+
+[dependencies]
+chrono.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+studypulse-agent = { path = "../studypulse-agent" }
+studypulse-model-client = { path = "../studypulse-model-client" }
+studypulse-tools = { path = "../studypulse-tools" }
+studypulse-workspace = { path = "../studypulse-workspace" }
+thiserror.workspace = true
+tokio.workspace = true
+uniffi.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
