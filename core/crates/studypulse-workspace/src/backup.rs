@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
@@ -13,8 +14,9 @@ use walkdir::WalkDir;
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    ComprehensiveExamFull, DiaryEntry, ExamFull, IosRecord, MistakeNoteFull, Result, TaskItem,
-    Workspace, WorkspaceError, validate_wire_relative_path,
+    CoachDataRow, ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal, ExamPlan, ExamSimulation,
+    IosRecord, MistakeNoteFull, Result, TaskItem, Workspace, WorkspaceError, decode_coach_payload,
+    validate_wire_relative_path,
 };
 
 const FORMAT_IDENTIFIER: &str = "com.chenkai.gao.studypulse.backup";
@@ -516,6 +518,9 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
         "time_investment_subtasks.jsonl",
         "goal_rewards.jsonl",
         "coach_data.jsonl",
+        "exam_goals.jsonl",
+        "exam_plans.jsonl",
+        "exam_simulations.jsonl",
     ];
     // Copy every existing data file first. This is intentional: files owned by
     // newer iOS/P1/P2 features must survive a Desktop import/export even when
@@ -632,14 +637,50 @@ fn manifest_key_for_file(name: &str) -> Option<&'static str> {
         "time_investment_subjects.jsonl" => Some("timeInvestmentSubjects"),
         "time_investment_subtasks.jsonl" => Some("subTasks"),
         "goal_rewards.jsonl" => Some("goalRewards"),
+        "exam_goals.jsonl" => Some("examGoals"),
+        "exam_plans.jsonl" => Some("examPlans"),
+        "exam_simulations.jsonl" => Some("examSimulations"),
         "profile.json" => Some("profile"),
         "plant_state.json" => Some("plantState"),
         "achievements.json" => Some("achievements"),
-        "coach_data.jsonl" => None,
+        "coach_data.jsonl" => Some("coachData"),
         "preferences.json" => None,
         "health_history.json" => None,
         _ => None,
     }
+}
+
+fn validate_coach_jsonl(path: &Path) -> Result<()> {
+    for (index, line) in BufReader::new(File::open(path)?).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let row: CoachDataRow =
+            serde_json::from_str(&line).map_err(|error| WorkspaceError::MalformedData {
+                path: format!("{}:{}", path.display(), index + 1),
+                detail: error.to_string(),
+            })?;
+        match row.kind.as_str() {
+            "goal" => {
+                let _: crate::CoachGoal = decode_coach_payload(&row)?;
+            }
+            "analysis" => {
+                let _: crate::CoachAnalysis = decode_coach_payload(&row)?;
+            }
+            "proposal" => {
+                let _: crate::CoachProposal = decode_coach_payload(&row)?;
+            }
+            "chat" => {
+                let _: crate::CoachChat = decode_coach_payload(&row)?;
+            }
+            "message" => {
+                let _: crate::CoachConversationMessage = decode_coach_payload(&row)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn media_stats(root: &Path) -> Result<(usize, u64)> {
@@ -759,6 +800,36 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
         }
         record.value.validate().map_err(|error| error.to_string())
     })?;
+    if staging.join("data/exam_goals.jsonl").is_file() {
+        validate_typed_jsonl::<ExamGoal>(&staging.join("data/exam_goals.jsonl"), |record| {
+            if record.id != record.value.id {
+                return Err("envelope id mismatch".into());
+            }
+            record.value.validate().map_err(|error| error.to_string())
+        })?;
+    }
+    if staging.join("data/exam_plans.jsonl").is_file() {
+        validate_typed_jsonl::<ExamPlan>(&staging.join("data/exam_plans.jsonl"), |record| {
+            if record.id != record.value.id {
+                return Err("envelope id mismatch".into());
+            }
+            record.value.validate().map_err(|error| error.to_string())
+        })?;
+    }
+    if staging.join("data/exam_simulations.jsonl").is_file() {
+        validate_typed_jsonl::<ExamSimulation>(
+            &staging.join("data/exam_simulations.jsonl"),
+            |record| {
+                if record.id != record.value.id {
+                    return Err("envelope id mismatch".into());
+                }
+                record.value.validate().map_err(|error| error.to_string())
+            },
+        )?;
+    }
+    if staging.join("data/coach_data.jsonl").is_file() {
+        validate_coach_jsonl(&staging.join("data/coach_data.jsonl"))?;
+    }
 
     for entry in fs::read_dir(staging.join("data"))? {
         let entry = entry?;
@@ -1235,6 +1306,15 @@ fn write_jsonl_map(path: &Path, values: HashMap<String, Value>) -> Result<()> {
 }
 
 fn record_id(value: &Value) -> Option<String> {
+    if let (Some(kind), Some(payload)) = (
+        value.get("kind").and_then(Value::as_str),
+        value.get("payload").and_then(Value::as_str),
+    ) && let Ok(bytes) = BASE64.decode(payload)
+        && let Ok(decoded) = serde_json::from_slice::<Value>(&bytes)
+        && let Some(id) = decoded.get("id").and_then(Value::as_str)
+    {
+        return Some(format!("coach:{kind}:{id}"));
+    }
     value
         .get("id")
         .and_then(Value::as_str)

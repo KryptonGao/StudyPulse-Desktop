@@ -35,6 +35,9 @@ pub enum AgentMode {
     DeepResearch,
     QuestionLab,
     Visualize,
+    Coach,
+    ExamSimulation,
+    ReversePlanner,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +93,27 @@ pub fn capability_manifests() -> Vec<CapabilityManifest> {
             "Create and validate a teaching visualization.",
             &["analyzing", "generating", "reviewing"],
             5,
+        ),
+        manifest(
+            AgentMode::Coach,
+            "AI Coach",
+            "Analyze a goal and propose reviewable study tasks as strict JSON.",
+            &["diagnosing", "forecasting", "proposing", "checking"],
+            8,
+        ),
+        manifest(
+            AgentMode::ExamSimulation,
+            "Exam Simulation",
+            "Generate or grade a timed exam session as strict JSON.",
+            &["blueprinting", "generating", "grading", "analyzing"],
+            8,
+        ),
+        manifest(
+            AgentMode::ReversePlanner,
+            "Reverse Planner",
+            "Turn an exam target into a weak-point and daily route as strict JSON.",
+            &["contextualizing", "prioritizing", "routing", "checking"],
+            8,
         ),
     ]
 }
@@ -1131,9 +1155,11 @@ mod tests {
     #[test]
     fn capability_manifests_cover_all_modes() {
         let manifests = capability_manifests();
-        assert_eq!(manifests.len(), 6);
+        assert_eq!(manifests.len(), 9);
         assert_eq!(manifests[1].mode, AgentMode::DeepSolve);
         assert_eq!(manifests[5].mode, AgentMode::Visualize);
+        assert_eq!(manifests[6].mode, AgentMode::Coach);
+        assert_eq!(manifests[8].mode, AgentMode::ReversePlanner);
         assert!(manifests.iter().all(|manifest| !manifest.stages.is_empty()));
     }
 

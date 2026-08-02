@@ -162,3 +162,26 @@ h1, h2, h3, strong { letter-spacing: -0.025em; }
   .rating-row { grid-template-columns: repeat(2, 1fr); }
   .flashcard-card { min-height: 300px; padding: 24px; }
 }
+.feature-page { gap: 18px; }
+.feature-form { align-items: end; }
+.feature-empty { min-height: 180px; display: grid; place-content: center; text-align: center; color: var(--muted); gap: 6px; }
+.proposal-card, .question-card { margin-top: 18px; padding: 20px; border-radius: 18px; background: color-mix(in srgb, var(--surface) 80%, var(--accent) 20%); border: 1px solid var(--line); }
+.button-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.chat-history { display: grid; gap: 10px; min-height: 60px; margin: 12px 0; }
+.chat-history .message { padding: 12px 14px; border-radius: 14px; background: var(--surface-muted); }
+.chat-history .message.user { background: var(--accent-soft); justify-self: end; max-width: 80%; }
+.simulation-row { width: 100%; display: flex; justify-content: space-between; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 12px 4px; color: inherit; text-align: left; cursor: pointer; }
+.simulation-row.active { color: var(--accent-strong); font-weight: 700; }
+.simulation-row span { color: var(--muted); font-weight: 400; }
+.timer-badge { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 700; color: var(--accent-strong); }
+.question-card h3 { margin: 14px 0 20px; }
+.option-list { display: grid; gap: 10px; margin-bottom: 20px; }
+.option { border: 1px solid var(--line); background: var(--surface); border-radius: 12px; padding: 12px; text-align: left; color: inherit; cursor: pointer; }
+.option.selected { border-color: var(--accent-strong); background: var(--accent-soft); }
+.report-bars { display: grid; gap: 8px; margin: 26px 0; }
+.report-bar-row { display: grid; grid-template-columns: 46px 1fr 52px; gap: 10px; align-items: center; font-size: 12px; }
+.report-bar-row > div { height: 10px; border-radius: 999px; background: var(--surface-muted); overflow: hidden; }
+.report-bar-row i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent-strong), var(--accent)); }
+.report-bar-row strong { text-align: right; font-size: 12px; }
+.report-actions { justify-content: flex-end; }
+@media print { .sidebar, .topbar, .report-actions { display: none !important; } .main-column { margin: 0; } .report-sheet { box-shadow: none; border: 0; } }
