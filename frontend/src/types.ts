@@ -5,7 +5,10 @@ export type AgentMode =
   | "Mastery"
   | "DeepResearch"
   | "QuestionLab"
-  | "Visualize";
+  | "Visualize"
+  | "Coach"
+  | "ExamSimulation"
+  | "ReversePlanner";
 export type AgentEventKind =
   | "Started"
   | "StatusChanged"
@@ -187,6 +190,89 @@ export interface Exam {
   countdown_notify_days: number[] | null;
   exam_review: unknown;
   extra_json: string;
+}
+
+export interface ComprehensiveExam {
+  id: string;
+  name: string;
+  exam_date: string;
+  exam_end_date: string | null;
+  importance: number;
+  subject: string[];
+  exam_name: string;
+  mastery_degree: number;
+  subject_time_slots: Record<string, unknown> | null;
+  phase_id: string | null;
+  extra_json: string;
+}
+
+export type CoachGoalStatus = "active" | "paused" | "achieved" | "abandoned";
+export type CoachProposalStatus = "pending" | "approved" | "rejected" | "expired" | "superseded";
+
+export interface CoachGoalSubject {
+  id: string;
+  subject: string;
+  baselineScore: number;
+  targetScore: number;
+  fullScore: number;
+  weight: number;
+}
+
+export interface CoachGoal {
+  id: string;
+  title: string;
+  subjects: CoachGoalSubject[];
+  examId: string | null;
+  comprehensiveExamId: string | null;
+  startDate: string;
+  targetDate: string;
+  dailyAvailableMinutes: number;
+  purpose: string;
+  constraints: string;
+  status: CoachGoalStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CoachPrediction { subject: string; predicted: number; lowerBound: number; upperBound: number; targetScore: number; confidence: number; sampleSize: number; }
+export interface CoachRisk { id: string; title: string; severity: string; detail: string; }
+export interface CoachEvidence { source: string; detail: string; }
+export interface CoachAnalysis {
+  id: string; goalId: string; goalVersion: number; calculatedAt: string; decision: string;
+  weightedPredicted: number; weightedLowerBound: number; weightedUpperBound: number; successProbability: number;
+  predictions: CoachPrediction[]; risks: CoachRisk[]; evidence: CoachEvidence[]; dataFingerprint: string;
+}
+export interface CoachProposalItem { id: string; title: string; subject: string; startDate: string; objective: string; stopCondition: string; importance: number; }
+export interface CoachProposal {
+  id: string; goalId: string; goalVersion: number; analysisId: string; conclusion: string; rationale: string;
+  items: CoachProposalItem[]; status: CoachProposalStatus; createdAt: string; expiresAt: string;
+  resolvedAt: string | null; failureReason: string | null; alternative: string | null;
+}
+export interface CoachChat { id: string; goalId: string | null; title: string; createdAt: string; updatedAt: string; }
+export interface CoachConversationMessage { id: string; chatId: string; role: string; content: string; createdAt: string; todoSuggestions: CoachProposalItem[]; }
+export interface CoachData { goals: CoachGoal[]; analyses: CoachAnalysis[]; proposals: CoachProposal[]; chats: CoachChat[]; messages: CoachConversationMessage[]; }
+
+export interface ExamGoal { id: string; examName: string; subject: string; examDate: string; currentScore: number; targetScore: number; fullScore: number; phaseId: string | null; createdAt: string; }
+export interface ExamWeakPoint { id: string; topic: string; mastery: number; possibleScoreGain: number; priority: number; }
+export interface ExamPlanPhase { id: string; name: string; dayRange: string; goal: string; }
+export interface DailyExamTask { id: string; dayOffset: number; date: string; subject: string; durationMinutes: number; taskTitle: string; reason: string; }
+export interface ExamPlan { id: string; examGoalId: string; improvementTarget: number; summary: string; weakPoints: ExamWeakPoint[]; phases: ExamPlanPhase[]; dailyTasks: DailyExamTask[]; modelInfo: string; createdAt: string; }
+export type ExamSimulationStatus = "preparing" | "running" | "grading" | "analyzing" | "completed" | "abandoned" | "analysisFailed";
+export type ExamQuestionKind = "multipleChoice" | "freeResponse";
+export interface ExamQuestion { id: string; kind: ExamQuestionKind; prompt: string; options: string[]; correctAnswer: string | null; explanation: string; points: number; }
+export interface ExamQuestionRecord { questionId: string; firstViewedAt: string | null; lastViewedAt: string | null; totalViewSeconds: number; visitCount: number; skipCount: number; answerChangeCount: number; firstAnswer: string | null; finalAnswer: string | null; submittedAt: string | null; isCorrect: boolean | null; score: number | null; }
+export type ExamSimulationEventKind = "started" | "questionEntered" | "questionLeft" | "answerChanged" | "skipped" | "submitted" | "timedOut" | "abandoned";
+export interface ExamSimulationEvent { id: string; kind: ExamSimulationEventKind; timestamp: string; questionId: string | null; questionIndex: number | null; previousAnswer: string | null; answer: string | null; remainingSeconds: number; }
+export interface ExamRoleAnalysis { role: string; confidence: number; evidence: string[]; risk: string; strategies: string[]; isStable: boolean; generatedAt: string; }
+export interface ExamSimulation { id: string; subject: string; createdAt: string; startedAt: string | null; endedAt: string | null; durationSeconds: number; status: ExamSimulationStatus; questions: ExamQuestion[]; questionRecords: ExamQuestionRecord[]; events: ExamSimulationEvent[]; totalScore: number | null; analysis: ExamRoleAnalysis | null; lastError: string | null; }
+
+export interface DailyReportPoint { date: string; studyMinutes: number; sessionCount: number; moodScore: number | null; energyScore: number | null; }
+export interface LearningReport {
+  rangeDays: number; fromDate: string; toDate: string; totalStudyMinutes: number; sessionCount: number; averageSessionMinutes: number;
+  subjectDistribution: Record<string, number>; intensityDistribution: Record<string, number>; gradeCount: number; averageScoreRate: number | null;
+  mistakeCount: number; examCount: number; topSubject: string | null; weakestSubject: string | null; dailyStudyMinutes: DailyReportPoint[];
+  diaryCount: number; averageMoodScore: number | null; averageEnergyScore: number | null;
 }
 
 export interface FileEntry {

@@ -4,13 +4,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use studypulse_ffi::{
     AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, BackupExportOptionsDto,
     BackupExportResultDto, BackupInspectionDto, BackupResolutionDto, ByokConfigDto,
-    CloudAccountDto, CloudAuthTokensDto, ConfirmationDecisionDto, CoreError, DiaryEntryDto,
-    ExamDto, FileEntryDto, GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto,
+    CloudAccountDto, CloudAuthTokensDto, ComprehensiveExamDto, ConfirmationDecisionDto, CoreError,
+    DiaryEntryDto, ExamDto, FileEntryDto, GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto,
     RestoreModeDto, ReviewStateDto, RunStatusDto, SearchMatchDto, SessionIntensityDto,
     StudyPhaseDto, StudySessionDto, SubjectDto, TaskDto, TimeInvestmentSubjectDto,
     TimerSnapshotDto, TodaySnapshotDto, TrendsSnapshotDto, WorkspaceDto,
@@ -564,6 +565,11 @@ read_command!(get_mistakes, get_mistakes, Vec<MistakeNoteDto>);
 read_command!(get_due_mistakes, get_due_mistakes, Vec<MistakeNoteDto>);
 read_command!(get_diary_entries, get_diary_entries, Vec<DiaryEntryDto>);
 read_command!(get_exams, get_exams, Vec<ExamDto>);
+read_command!(get_comprehensive_exams, get_comprehensive_exams, Vec<ComprehensiveExamDto>);
+read_command!(get_coach_data_json, get_coach_data_json, String);
+read_command!(get_exam_goals_json, get_exam_goals_json, Vec<String>);
+read_command!(get_exam_plans_json, get_exam_plans_json, Vec<String>);
+read_command!(get_exam_simulations_json, get_exam_simulations_json, Vec<String>);
 read_command!(get_study_sessions, get_study_sessions, Vec<StudySessionDto>);
 read_command!(
     get_time_investment_subjects,
@@ -608,6 +614,11 @@ delete_command!(delete_grade, delete_grade);
 delete_command!(delete_mistake, delete_mistake);
 delete_command!(delete_diary_entry, delete_diary_entry);
 delete_command!(delete_exam, delete_exam);
+delete_command!(delete_comprehensive_exam, delete_comprehensive_exam);
+delete_command!(delete_coach_goal, delete_coach_goal);
+delete_command!(delete_exam_goal, delete_exam_goal);
+delete_command!(delete_exam_plan, delete_exam_plan);
+delete_command!(delete_exam_simulation, delete_exam_simulation);
 delete_command!(delete_study_session, delete_study_session);
 delete_command!(
     delete_time_investment_subject,
@@ -662,6 +673,120 @@ async fn enroll_mistake(
 #[tauri::command]
 async fn upsert_exam(value: ExamDto, state: State<'_, AppState>) -> Result<(), AppError> {
     core_call(state, move |core| core.upsert_exam(value)).await
+}
+
+#[tauri::command]
+async fn upsert_comprehensive_exam(value: ComprehensiveExamDto, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_comprehensive_exam(value)).await
+}
+
+#[tauri::command]
+async fn upsert_coach_goal(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_coach_goal_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_coach_analysis(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_coach_analysis_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_coach_proposal(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_coach_proposal_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_coach_chat(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_coach_chat_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_coach_message(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_coach_message_json(value_json)).await
+}
+
+#[tauri::command]
+async fn resolve_coach_proposal(
+    proposal_id: String,
+    decision: String,
+    expected_goal_version: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    core_call(state, move |core| core.resolve_coach_proposal(proposal_id, decision, expected_goal_version)).await
+}
+
+#[tauri::command]
+async fn upsert_exam_goal(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_exam_goal_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_exam_plan(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_exam_plan_json(value_json)).await
+}
+
+#[tauri::command]
+async fn upsert_exam_simulation(value_json: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_exam_simulation_json(value_json)).await
+}
+
+#[tauri::command]
+async fn new_exam_simulation(subject: String, state: State<'_, AppState>) -> Result<String, AppError> {
+    core_call(state, move |core| core.new_exam_simulation_json(subject)).await
+}
+
+#[tauri::command]
+async fn get_learning_report(range_days: i64, state: State<'_, AppState>) -> Result<String, AppError> {
+    core_call(state, move |core| core.get_learning_report_json(range_days)).await
+}
+
+fn report_destination(path: &str, extension: &str, state: &AppState) -> Result<PathBuf, AppError> {
+    let candidate = PathBuf::from(path);
+    if candidate.file_name().is_none() || candidate.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case(extension)) != Some(true) {
+        return Err(AppError::InvalidInput { message: format!("report path must end with .{extension}") });
+    }
+    let parent = candidate.parent().ok_or_else(|| AppError::InvalidInput { message: "report path has no parent directory".into() })?;
+    let parent = parent.canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
+    let candidate = parent.join(candidate.file_name().expect("checked above"));
+    if let Some(workspace) = state.core.current_workspace() {
+        let root = Path::new(&workspace.root_path).canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
+        if candidate.starts_with(root) {
+            return Err(AppError::InvalidInput { message: "reports must be saved outside the Workspace data directory".into() });
+        }
+    }
+    Ok(candidate)
+}
+
+#[tauri::command]
+async fn write_report_file(path: String, extension: String, contents: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let destination = report_destination(&path, &extension, &state)?;
+    fs::write(destination, contents).map_err(|error| AppError::File { message: error.to_string() })
+}
+
+#[tauri::command]
+async fn write_report_asset(path: String, contents_base64: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let destination = report_destination(&path, "png", &state)?;
+    let contents = BASE64.decode(contents_base64).map_err(|error| AppError::InvalidInput { message: error.to_string() })?;
+    if contents.len() > 20 * 1024 * 1024 {
+        return Err(AppError::InvalidInput { message: "report image is too large".into() });
+    }
+    fs::write(destination, contents).map_err(|error| AppError::File { message: error.to_string() })
+}
+
+#[tauri::command]
+async fn share_report(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let candidate = PathBuf::from(&path);
+    if !candidate.is_file() {
+        return Err(AppError::File { message: "report file does not exist".into() });
+    }
+    if let Some(workspace) = state.core.current_workspace() {
+        let root = Path::new(&workspace.root_path).canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
+        if candidate.canonicalize().map_err(|error| AppError::File { message: error.to_string() })?.starts_with(root) {
+            return Err(AppError::InvalidInput { message: "cannot share a Workspace data file as a report".into() });
+        }
+    }
+    std::process::Command::new("open").arg(&candidate).status().map_err(|error| AppError::File { message: error.to_string() })?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -863,6 +988,31 @@ pub fn run() {
             get_exams,
             upsert_exam,
             delete_exam,
+            get_comprehensive_exams,
+            upsert_comprehensive_exam,
+            delete_comprehensive_exam,
+            get_coach_data_json,
+            upsert_coach_goal,
+            upsert_coach_analysis,
+            upsert_coach_proposal,
+            upsert_coach_chat,
+            upsert_coach_message,
+            resolve_coach_proposal,
+            delete_coach_goal,
+            get_exam_goals_json,
+            upsert_exam_goal,
+            delete_exam_goal,
+            get_exam_plans_json,
+            upsert_exam_plan,
+            delete_exam_plan,
+            get_exam_simulations_json,
+            new_exam_simulation,
+            upsert_exam_simulation,
+            delete_exam_simulation,
+            get_learning_report,
+            write_report_file,
+            write_report_asset,
+            share_report,
             get_study_sessions,
             delete_study_session,
             get_time_investment_subjects,

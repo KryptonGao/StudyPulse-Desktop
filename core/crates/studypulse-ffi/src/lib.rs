@@ -18,13 +18,15 @@ use studypulse_model_client::{
 use studypulse_tools::PermissionLevel;
 use studypulse_workspace::{
     AgentMessage, AgentMessageRole, AgentNotebook, BackupExportOptions, BackupInspection,
-    BackupResolution, ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem,
-    ExamFull, ExamReview, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
-    HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull,
-    PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SearchMatch,
-    SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem,
-    TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme, TodaySnapshot,
-    TrendsSnapshot, Workspace, WorkspaceInfo,
+    BackupResolution, CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal, CoachProposal,
+    ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal,
+    ExamPlan, ExamReview, ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade,
+    HandwritingAnswerEntry, HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry,
+    MistakeNoteFull, PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType,
+    SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject,
+    TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme,
+    TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired,
+    parse_structured_json, proposal_task,
 };
 use thiserror::Error;
 
@@ -585,6 +587,9 @@ pub enum AgentModeDto {
     DeepResearch,
     QuestionLab,
     Visualize,
+    Coach,
+    ExamSimulation,
+    ReversePlanner,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
@@ -1269,6 +1274,215 @@ impl StudyPulseCore {
         self.workspace()?
             .delete_comprehensive_exam(parse_uuid(&id)?)
             .map_err(CoreError::message)
+    }
+
+    pub fn get_coach_data_json(&self) -> Result<String, CoreError> {
+        let data = self
+            .workspace()?
+            .read_coach_data()
+            .map_err(CoreError::message)?;
+        serde_json::to_string(&serde_json::json!({
+            "goals": data.goals,
+            "analyses": data.analyses,
+            "proposals": data.proposals,
+            "chats": data.chats,
+            "messages": data.messages,
+        }))
+        .map_err(CoreError::message)
+    }
+
+    pub fn upsert_coach_goal_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: CoachGoal = parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_coach_goal(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn upsert_coach_analysis_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: CoachAnalysis =
+            parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_coach_analysis(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn upsert_coach_proposal_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: CoachProposal =
+            parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_coach_proposal(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn upsert_coach_chat_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: CoachChat = parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_coach_chat(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn upsert_coach_message_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: CoachConversationMessage =
+            parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_coach_message(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn delete_coach_goal(&self, id: String) -> Result<(), CoreError> {
+        self.workspace()?
+            .delete_coach_goal(parse_uuid(&id)?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn resolve_coach_proposal(
+        &self,
+        proposal_id: String,
+        decision: String,
+        expected_goal_version: i64,
+    ) -> Result<Vec<String>, CoreError> {
+        let workspace = self.workspace()?;
+        let mut data = workspace.read_coach_data().map_err(CoreError::message)?;
+        let proposal_id = parse_uuid(&proposal_id)?;
+        let index = data
+            .proposals
+            .iter()
+            .position(|value| value.id == proposal_id)
+            .ok_or_else(|| CoreError::message("coach proposal not found"))?;
+        let proposal = data.proposals[index].clone();
+        let goal = data
+            .goals
+            .iter()
+            .find(|value| value.id == proposal.goal_id)
+            .ok_or_else(|| CoreError::message("coach goal not found"))?;
+        if goal.version != expected_goal_version || proposal.goal_version != expected_goal_version {
+            return Err(CoreError::message("coach proposal version is stale"));
+        }
+        if !matches!(
+            proposal.status,
+            studypulse_workspace::CoachProposalStatus::Pending
+        ) {
+            return Err(CoreError::message("coach proposal is no longer pending"));
+        }
+        if expired(&proposal.expires_at) {
+            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Expired;
+            data.proposals[index].resolved_at = Some(chrono::Utc::now().to_rfc3339());
+            workspace
+                .write_coach_data(&data)
+                .map_err(CoreError::message)?;
+            return Err(CoreError::message("coach proposal has expired"));
+        }
+        let approved =
+            decision.eq_ignore_ascii_case("approve") || decision.eq_ignore_ascii_case("approved");
+        let now = chrono::Utc::now().to_rfc3339();
+        if approved {
+            let tasks: Vec<_> = proposal
+                .items
+                .iter()
+                .map(|item| proposal_task(&proposal, item))
+                .collect::<std::result::Result<_, _>>()
+                .map_err(CoreError::message)?;
+            for task in &tasks {
+                task.validate().map_err(CoreError::message)?;
+            }
+            for task in &tasks {
+                workspace
+                    .upsert_task(task.clone())
+                    .map_err(CoreError::message)?;
+            }
+            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Approved;
+            data.proposals[index].resolved_at = Some(now);
+            workspace
+                .write_coach_data(&data)
+                .map_err(CoreError::message)?;
+            Ok(tasks.into_iter().map(|task| task.id.to_string()).collect())
+        } else {
+            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Rejected;
+            data.proposals[index].resolved_at = Some(now);
+            workspace
+                .write_coach_data(&data)
+                .map_err(CoreError::message)?;
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn get_exam_goals_json(&self) -> Result<Vec<String>, CoreError> {
+        self.workspace()?
+            .read_exam_goals()
+            .map_err(CoreError::message)?
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).map_err(CoreError::message))
+            .collect()
+    }
+
+    pub fn upsert_exam_goal_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: ExamGoal = parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_exam_goal(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn delete_exam_goal(&self, id: String) -> Result<(), CoreError> {
+        self.workspace()?
+            .delete_exam_goal(parse_uuid(&id)?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn get_exam_plans_json(&self) -> Result<Vec<String>, CoreError> {
+        self.workspace()?
+            .read_exam_plans()
+            .map_err(CoreError::message)?
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).map_err(CoreError::message))
+            .collect()
+    }
+
+    pub fn upsert_exam_plan_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: ExamPlan = parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_exam_plan(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn delete_exam_plan(&self, id: String) -> Result<(), CoreError> {
+        self.workspace()?
+            .delete_exam_plan(parse_uuid(&id)?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn get_exam_simulations_json(&self) -> Result<Vec<String>, CoreError> {
+        self.workspace()?
+            .read_exam_simulations()
+            .map_err(CoreError::message)?
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).map_err(CoreError::message))
+            .collect()
+    }
+
+    pub fn new_exam_simulation_json(&self, subject: String) -> Result<String, CoreError> {
+        serde_json::to_string(&default_simulation(subject, None)).map_err(CoreError::message)
+    }
+
+    pub fn upsert_exam_simulation_json(&self, value_json: String) -> Result<(), CoreError> {
+        let value: ExamSimulation =
+            parse_structured_json(&value_json).map_err(CoreError::message)?;
+        self.workspace()?
+            .upsert_exam_simulation(value)
+            .map_err(CoreError::message)
+    }
+
+    pub fn delete_exam_simulation(&self, id: String) -> Result<(), CoreError> {
+        self.workspace()?
+            .delete_exam_simulation(parse_uuid(&id)?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn get_learning_report_json(&self, range_days: i64) -> Result<String, CoreError> {
+        let report = self
+            .workspace()?
+            .learning_report(range_days)
+            .map_err(CoreError::message)?;
+        serde_json::to_string(&report).map_err(CoreError::message)
     }
 
     pub fn get_routines(&self) -> Result<Vec<RoutineDto>, CoreError> {
@@ -3138,6 +3352,9 @@ impl From<AgentMode> for AgentModeDto {
             AgentMode::DeepResearch => Self::DeepResearch,
             AgentMode::QuestionLab => Self::QuestionLab,
             AgentMode::Visualize => Self::Visualize,
+            AgentMode::Coach => Self::Coach,
+            AgentMode::ExamSimulation => Self::ExamSimulation,
+            AgentMode::ReversePlanner => Self::ReversePlanner,
         }
     }
 }
@@ -3151,6 +3368,9 @@ impl From<AgentModeDto> for AgentMode {
             AgentModeDto::DeepResearch => Self::DeepResearch,
             AgentModeDto::QuestionLab => Self::QuestionLab,
             AgentModeDto::Visualize => Self::Visualize,
+            AgentModeDto::Coach => Self::Coach,
+            AgentModeDto::ExamSimulation => Self::ExamSimulation,
+            AgentModeDto::ReversePlanner => Self::ReversePlanner,
         }
     }
 }

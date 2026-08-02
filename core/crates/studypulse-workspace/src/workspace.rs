@@ -13,10 +13,13 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    AgentNotebook, ComprehensiveExamFull, DiaryEntry, ExamFull, FileEntry, GoalReward, Grade,
-    IosRecord, MistakeNoteFull, Result, Routine, RoutineInstance, SafeRelativePath, SearchMatch,
-    StudyPhase, StudySession, SubTask, Subject, TaskItem, TimeInvestmentSubject, WorkspaceError,
-    WorkspaceInfo, platform::is_link_like, safe_path::ensure_no_symlink_components,
+    AgentNotebook, CoachAnalysis, CoachChat, CoachConversationMessage, CoachData, CoachDataRow,
+    CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal, ExamPlan,
+    ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull, Result, Routine,
+    RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession, SubTask, Subject,
+    TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo, decode_coach_payload,
+    learning_report, make_coach_row, platform::is_link_like,
+    safe_path::ensure_no_symlink_components,
 };
 
 const WORKSPACE_SCHEMA_VERSION: u32 = 1;
@@ -80,6 +83,9 @@ impl Workspace {
             "time_investment_subtasks.jsonl",
             "goal_rewards.jsonl",
             "coach_data.jsonl",
+            "exam_goals.jsonl",
+            "exam_plans.jsonl",
+            "exam_simulations.jsonl",
         ] {
             let path = root.join("Data").join(file);
             if !path.exists() {
@@ -574,6 +580,272 @@ impl Workspace {
 
     pub fn delete_comprehensive_exam(&self, id: Uuid) -> Result<()> {
         self.delete_jsonl_record::<ComprehensiveExamFull>("Data/comprehensive_exams.jsonl", id)
+    }
+
+    pub fn read_exam_goals(&self) -> Result<Vec<ExamGoal>> {
+        let values: Vec<ExamGoal> = self.read_jsonl_records("Data/exam_goals.jsonl")?;
+        for value in &values {
+            value.validate()?;
+        }
+        Ok(values)
+    }
+
+    pub fn upsert_exam_goal(&self, value: ExamGoal) -> Result<()> {
+        value.validate()?;
+        self.upsert_jsonl_record("Data/exam_goals.jsonl", value, |value| value.id)
+    }
+
+    pub fn delete_exam_goal(&self, id: Uuid) -> Result<()> {
+        self.delete_jsonl_record::<ExamGoal>("Data/exam_goals.jsonl", id)
+    }
+
+    pub fn read_exam_plans(&self) -> Result<Vec<ExamPlan>> {
+        let goals: std::collections::HashSet<_> = self
+            .read_exam_goals()?
+            .into_iter()
+            .map(|value| value.id)
+            .collect();
+        let plans: Vec<ExamPlan> = self.read_jsonl_records("Data/exam_plans.jsonl")?;
+        for plan in &plans {
+            plan.validate()?;
+        }
+        if let Some(plan) = plans
+            .iter()
+            .find(|value| !goals.contains(&value.exam_goal_id))
+        {
+            return Err(WorkspaceError::MalformedData {
+                path: "Data/exam_plans.jsonl".into(),
+                detail: format!("plan references missing exam goal {}", plan.exam_goal_id),
+            });
+        }
+        Ok(plans)
+    }
+
+    pub fn upsert_exam_plan(&self, value: ExamPlan) -> Result<()> {
+        value.validate()?;
+        if !self
+            .read_exam_goals()?
+            .iter()
+            .any(|goal| goal.id == value.exam_goal_id)
+        {
+            return Err(WorkspaceError::MalformedData {
+                path: "Data/exam_plans.jsonl".into(),
+                detail: "plan references a missing exam goal".into(),
+            });
+        }
+        self.upsert_jsonl_record("Data/exam_plans.jsonl", value, |value| value.id)
+    }
+
+    pub fn delete_exam_plan(&self, id: Uuid) -> Result<()> {
+        self.delete_jsonl_record::<ExamPlan>("Data/exam_plans.jsonl", id)
+    }
+
+    pub fn read_exam_simulations(&self) -> Result<Vec<ExamSimulation>> {
+        let values: Vec<ExamSimulation> = self.read_jsonl_records("Data/exam_simulations.jsonl")?;
+        for value in &values {
+            value.validate()?;
+        }
+        Ok(values)
+    }
+
+    pub fn upsert_exam_simulation(&self, value: ExamSimulation) -> Result<()> {
+        value.validate()?;
+        self.upsert_jsonl_record("Data/exam_simulations.jsonl", value, |value| value.id)
+    }
+
+    pub fn delete_exam_simulation(&self, id: Uuid) -> Result<()> {
+        self.delete_jsonl_record::<ExamSimulation>("Data/exam_simulations.jsonl", id)
+    }
+
+    pub fn read_coach_data(&self) -> Result<CoachData> {
+        let path = self.root().join("Data/coach_data.jsonl");
+        if !path.exists() {
+            return Ok(CoachData::default());
+        }
+        let file = fs::File::open(path)?;
+        let mut data = CoachData::default();
+        for (index, line) in BufReader::new(file).lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let raw: serde_json::Value =
+                serde_json::from_str(&line).map_err(|error| WorkspaceError::MalformedData {
+                    path: format!("Data/coach_data.jsonl:{}", index + 1),
+                    detail: error.to_string(),
+                })?;
+            let row: CoachDataRow = serde_json::from_value(raw.clone()).map_err(|error| {
+                WorkspaceError::MalformedData {
+                    path: format!("Data/coach_data.jsonl:{}", index + 1),
+                    detail: error.to_string(),
+                }
+            })?;
+            match row.kind.as_str() {
+                "goal" => {
+                    let value: CoachGoal = decode_coach_payload(&row)?;
+                    data.row_extras
+                        .insert(format!("goal:{}", value.id), row.extra);
+                    data.goals.push(value);
+                }
+                "analysis" => {
+                    let value: CoachAnalysis = decode_coach_payload(&row)?;
+                    data.row_extras
+                        .insert(format!("analysis:{}", value.id), row.extra);
+                    data.analyses.push(value);
+                }
+                "proposal" => {
+                    let value: CoachProposal = decode_coach_payload(&row)?;
+                    data.row_extras
+                        .insert(format!("proposal:{}", value.id), row.extra);
+                    data.proposals.push(value);
+                }
+                "chat" => {
+                    let value: CoachChat = decode_coach_payload(&row)?;
+                    data.row_extras
+                        .insert(format!("chat:{}", value.id), row.extra);
+                    data.chats.push(value);
+                }
+                "message" => {
+                    let value: CoachConversationMessage = decode_coach_payload(&row)?;
+                    data.row_extras
+                        .insert(format!("message:{}", value.id), row.extra);
+                    data.messages.push(value);
+                }
+                _ => data.unknown_rows.push(raw),
+            }
+        }
+        data.validate()?;
+        Ok(data)
+    }
+
+    pub fn upsert_coach_goal(&self, value: CoachGoal) -> Result<()> {
+        value.validate()?;
+        let mut data = self.read_coach_data()?;
+        upsert_value(&mut data.goals, value, |value| value.id);
+        self.write_coach_data(&data)
+    }
+
+    pub fn upsert_coach_analysis(&self, value: CoachAnalysis) -> Result<()> {
+        let mut data = self.read_coach_data()?;
+        upsert_value(&mut data.analyses, value, |value| value.id);
+        self.write_coach_data(&data)
+    }
+
+    pub fn upsert_coach_proposal(&self, value: CoachProposal) -> Result<()> {
+        let mut data = self.read_coach_data()?;
+        upsert_value(&mut data.proposals, value, |value| value.id);
+        self.write_coach_data(&data)
+    }
+
+    pub fn upsert_coach_chat(&self, value: CoachChat) -> Result<()> {
+        let mut data = self.read_coach_data()?;
+        upsert_value(&mut data.chats, value, |value| value.id);
+        self.write_coach_data(&data)
+    }
+
+    pub fn upsert_coach_message(&self, value: CoachConversationMessage) -> Result<()> {
+        let mut data = self.read_coach_data()?;
+        upsert_value(&mut data.messages, value, |value| value.id);
+        self.write_coach_data(&data)
+    }
+
+    pub fn delete_coach_goal(&self, id: Uuid) -> Result<()> {
+        let mut data = self.read_coach_data()?;
+        data.goals.retain(|value| value.id != id);
+        data.analyses.retain(|value| value.goal_id != id);
+        data.proposals.retain(|value| value.goal_id != id);
+        let chat_ids: std::collections::HashSet<_> = data
+            .chats
+            .iter()
+            .filter(|value| value.goal_id == Some(id))
+            .map(|value| value.id)
+            .collect();
+        data.chats.retain(|value| value.goal_id != Some(id));
+        data.messages
+            .retain(|value| !chat_ids.contains(&value.chat_id));
+        self.write_coach_data(&data)
+    }
+
+    pub fn write_coach_data(&self, data: &CoachData) -> Result<()> {
+        data.validate()?;
+        let mut rows = Vec::new();
+        for (kind, value) in [
+            ("goal", serde_json::to_value(&data.goals)?),
+            ("analysis", serde_json::to_value(&data.analyses)?),
+            ("proposal", serde_json::to_value(&data.proposals)?),
+            ("chat", serde_json::to_value(&data.chats)?),
+            ("message", serde_json::to_value(&data.messages)?),
+        ] {
+            let values = value.as_array().cloned().unwrap_or_default();
+            for value in values {
+                let row = match kind {
+                    "goal" => {
+                        let typed: CoachGoal = serde_json::from_value(value)?;
+                        let mut row = make_coach_row(kind, &typed)?;
+                        row.extra = data
+                            .row_extras
+                            .get(&format!("goal:{}", typed.id))
+                            .cloned()
+                            .unwrap_or_default();
+                        row
+                    }
+                    "analysis" => {
+                        let typed: CoachAnalysis = serde_json::from_value(value)?;
+                        let mut row = make_coach_row(kind, &typed)?;
+                        row.extra = data
+                            .row_extras
+                            .get(&format!("analysis:{}", typed.id))
+                            .cloned()
+                            .unwrap_or_default();
+                        row
+                    }
+                    "proposal" => {
+                        let typed: CoachProposal = serde_json::from_value(value)?;
+                        let mut row = make_coach_row(kind, &typed)?;
+                        row.extra = data
+                            .row_extras
+                            .get(&format!("proposal:{}", typed.id))
+                            .cloned()
+                            .unwrap_or_default();
+                        row
+                    }
+                    "chat" => {
+                        let typed: CoachChat = serde_json::from_value(value)?;
+                        let mut row = make_coach_row(kind, &typed)?;
+                        row.extra = data
+                            .row_extras
+                            .get(&format!("chat:{}", typed.id))
+                            .cloned()
+                            .unwrap_or_default();
+                        row
+                    }
+                    _ => {
+                        let typed: CoachConversationMessage = serde_json::from_value(value)?;
+                        let mut row = make_coach_row(kind, &typed)?;
+                        row.extra = data
+                            .row_extras
+                            .get(&format!("message:{}", typed.id))
+                            .cloned()
+                            .unwrap_or_default();
+                        row
+                    }
+                };
+                rows.push(serde_json::to_value(row)?);
+            }
+        }
+        rows.extend(data.unknown_rows.iter().cloned());
+        let mut bytes = Vec::new();
+        for row in rows {
+            serde_json::to_writer(&mut bytes, &row)?;
+            bytes.push(b'\n');
+        }
+        let _guard = self.inner.write_lock.lock();
+        atomic_write(&self.root().join("Data/coach_data.jsonl"), &bytes)
+    }
+
+    pub fn learning_report(&self, range_days: i64) -> Result<crate::LearningReport> {
+        crate::validate_report_range(range_days)?;
+        learning_report(self, range_days)
     }
 
     pub fn read_routines(&self) -> Result<Vec<Routine>> {

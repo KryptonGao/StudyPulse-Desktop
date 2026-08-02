@@ -6,10 +6,11 @@ import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { core, chooseBackupExportPath, chooseBackupToInspect, chooseDirectory, chooseSourceFiles, chooseWorkspaceToCreate, isDesktop } from "../lib/core";
 import { languageLocale, localizeEnum, useI18n, type Translate } from "../i18n";
-import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AppSnapshot, Exam, Grade, SessionIntensity, TimeInvestmentSubject } from "../types";
+import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AppSnapshot, ComprehensiveExam, Exam, Grade, SessionIntensity, TimeInvestmentSubject } from "../types";
 import { DiaryPage, FlashcardsPage, TrendsPage } from "./P1Pages";
+import { CoachPage, ExamSimulationPage, ReportsPage, ReversePlannerPage } from "./P2Pages";
 
-type Page = "today" | "agent" | "tasks" | "subjects" | "exams" | "mistakes" | "diary" | "trends" | "flashcards" | "timer" | "investment" | "library" | "settings";
+type Page = "today" | "agent" | "tasks" | "subjects" | "exams" | "coach" | "simulation" | "planner" | "reports" | "mistakes" | "diary" | "trends" | "flashcards" | "timer" | "investment" | "library" | "settings";
 
 const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: string }[] = [
   { id: "today", labelKey: "nav.today", icon: "✦" },
@@ -17,6 +18,10 @@ const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: strin
   { id: "tasks", labelKey: "nav.tasks", icon: "☑" },
   { id: "subjects", labelKey: "nav.subjects", icon: "◫" },
   { id: "exams", labelKey: "nav.exams", icon: "◷" },
+  { id: "coach", labelKey: "nav.coach", icon: "✧" },
+  { id: "simulation", labelKey: "nav.simulation", icon: "▹" },
+  { id: "planner", labelKey: "nav.planner", icon: "↗" },
+  { id: "reports", labelKey: "nav.reports", icon: "▤" },
   { id: "mistakes", labelKey: "nav.mistakes", icon: "!" },
   { id: "diary", labelKey: "nav.diary", icon: "◒" },
   { id: "trends", labelKey: "nav.trends", icon: "⌁" },
@@ -66,7 +71,7 @@ function themeLabel(t: Translate, value: string): string {
 }
 
 function modeLabel(t: Translate, value: string): string {
-  const key = value === "DeepSolve" ? "deepSolve" : value === "DeepResearch" ? "deepResearch" : value === "QuestionLab" ? "questionLab" : value.toLowerCase();
+  const key = value === "DeepSolve" ? "deepSolve" : value === "DeepResearch" ? "deepResearch" : value === "QuestionLab" ? "questionLab" : value === "ExamSimulation" ? "examSimulation" : value === "ReversePlanner" ? "reversePlanner" : value.toLowerCase();
   return localizeEnum(t, "mode", key);
 }
 
@@ -172,6 +177,10 @@ export default function App() {
         {page === "tasks" && <TasksPage />}
         {page === "subjects" && <SubjectsPage />}
         {page === "exams" && <ExamsPage />}
+        {page === "coach" && <CoachPage provider={snapshot.data?.provider} />}
+        {page === "simulation" && <ExamSimulationPage provider={snapshot.data?.provider} />}
+        {page === "planner" && <ReversePlannerPage provider={snapshot.data?.provider} />}
+        {page === "reports" && <ReportsPage />}
         {page === "mistakes" && <MistakesPage />}
         {page === "diary" && <DiaryPage />}
         {page === "trends" && <TrendsPage />}
@@ -267,14 +276,20 @@ function ExamsPage() {
   const { language, t } = useI18n();
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["exams"], queryFn: core.exams });
+  const comprehensiveQuery = useQuery({ queryKey: ["comprehensive-exams"], queryFn: core.comprehensiveExams });
   const subjectsQuery = useQuery({ queryKey: ["subjects"], queryFn: core.subjects });
   const [name, setName] = useState("");
   const [subject, setSubject] = useState("");
   const [examDate, setExamDate] = useState("");
   const [importance, setImportance] = useState(3);
+  const [comprehensiveName, setComprehensiveName] = useState("");
+  const [comprehensiveDate, setComprehensiveDate] = useState("");
+  const [comprehensiveSubjects, setComprehensiveSubjects] = useState("");
   const mutation = useMutation({ mutationFn: core.upsertExam, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["exams"] }); setName(""); setExamDate(""); }, onError: (error) => window.alert(errorMessage(error, t)) });
   const remove = useMutation({ mutationFn: core.deleteExam, onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["exams"] }), onError: (error) => window.alert(errorMessage(error, t)) });
-  if (query.isLoading || subjectsQuery.isLoading) return <PageLoading />;
+  const comprehensiveMutation = useMutation({ mutationFn: core.upsertComprehensiveExam, onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["comprehensive-exams"] }); setComprehensiveName(""); setComprehensiveDate(""); }, onError: (error) => window.alert(errorMessage(error, t)) });
+  const comprehensiveRemove = useMutation({ mutationFn: core.deleteComprehensiveExam, onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["comprehensive-exams"] }), onError: (error) => window.alert(errorMessage(error, t)) });
+  if (query.isLoading || comprehensiveQuery.isLoading || subjectsQuery.isLoading) return <PageLoading />;
   if (query.error) return <ErrorCard error={query.error} />;
   const exams = query.data ?? [];
   function saveExam() {
@@ -284,7 +299,13 @@ function ExamsPage() {
     const value: Exam = { id: crypto.randomUUID(), name: trimmed, exam_date: new Date(`${examDate}T09:00:00`).toISOString(), exam_end_date: null, importance, subject: subject.trim(), exam_name: trimmed, mastery_degree: 0, time_slot: null, phase_id: null, checklist: [], location_school: "", location_classroom: "", location_seat: "", countdown_notify_days: [7, 1], exam_review: null, extra_json: "{}" };
     mutation.mutate(value);
   }
-  return <div className="page-content"><SectionHeader title={t("exams.title")} description={t("exams.description")} action={<div className="inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("exams.name")} /><select value={subject} onChange={(event) => setSubject(event.target.value)}><option value="">{t("exams.subject")}</option>{(subjectsQuery.data ?? []).map((value) => <option key={value.id} value={value.name}>{value.display_name || value.name}</option>)}</select><input type="date" value={examDate} onChange={(event) => setExamDate(event.target.value)} /><input type="number" min="1" max="5" value={importance} onChange={(event) => setImportance(Number(event.target.value))} aria-label={t("exams.importance")} /><button className="button primary small" onClick={saveExam} disabled={mutation.isPending}>{mutation.isPending ? t("tasks.saving") : t("exams.add")}</button></div>} />{exams.length ? <div className="record-grid">{exams.slice().sort((a, b) => a.exam_date.localeCompare(b.exam_date)).map((exam) => <div className="record-card" key={exam.id}><div className="record-index">{formatDate(exam.exam_date, language)}</div><h3>{exam.name || exam.exam_name}</h3><div className="record-field"><span>{t("exams.subject")}</span><strong>{exam.subject || t("today.general")}</strong></div><div className="record-field"><span>{t("exams.importance")}</span><strong>{exam.importance}</strong></div><button className="button subtle small" onClick={() => remove.mutate(exam.id)} disabled={remove.isPending}>{t("exams.remove")}</button></div>)}</div> : <div className="panel"><EmptyState title={t("exams.none")} copy={t("exams.noneCopy")} /></div>}</div>;
+  function saveComprehensiveExam() {
+    if (!comprehensiveName.trim() || !comprehensiveDate) return;
+    const value: ComprehensiveExam = { id: crypto.randomUUID(), name: comprehensiveName.trim(), exam_date: new Date(`${comprehensiveDate}T09:00:00`).toISOString(), exam_end_date: null, importance: 3, subject: comprehensiveSubjects.split(",").map((item) => item.trim()).filter(Boolean), exam_name: comprehensiveName.trim(), mastery_degree: 0, subject_time_slots: null, phase_id: null, extra_json: "{}" };
+    comprehensiveMutation.mutate(value);
+  }
+  const comprehensiveExams = comprehensiveQuery.data ?? [];
+  return <div className="page-content"><SectionHeader title={t("exams.title")} description={t("exams.description")} action={<div className="inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("exams.name")} /><select value={subject} onChange={(event) => setSubject(event.target.value)}><option value="">{t("exams.subject")}</option>{(subjectsQuery.data ?? []).map((value) => <option key={value.id} value={value.name}>{value.display_name || value.name}</option>)}</select><input type="date" value={examDate} onChange={(event) => setExamDate(event.target.value)} /><input type="number" min="1" max="5" value={importance} onChange={(event) => setImportance(Number(event.target.value))} aria-label={t("exams.importance")} /><button className="button primary small" onClick={saveExam} disabled={mutation.isPending}>{mutation.isPending ? t("tasks.saving") : t("exams.add")}</button></div>} />{exams.length ? <div className="record-grid">{exams.slice().sort((a, b) => a.exam_date.localeCompare(b.exam_date)).map((exam) => <div className="record-card" key={exam.id}><div className="record-index">{formatDate(exam.exam_date, language)}</div><h3>{exam.name || exam.exam_name}</h3><div className="record-field"><span>{t("exams.subject")}</span><strong>{exam.subject || t("today.general")}</strong></div><div className="record-field"><span>{t("exams.importance")}</span><strong>{exam.importance}</strong></div><button className="button subtle small" onClick={() => remove.mutate(exam.id)} disabled={remove.isPending}>{t("exams.remove")}</button></div>)}</div> : <div className="panel"><EmptyState title={t("exams.none")} copy={t("exams.noneCopy")} /></div>}<section className="panel comprehensive-panel"><SectionHeader title={t("exams.comprehensive")} description={t("exams.comprehensiveDescription")} /><div className="inline-form"><input value={comprehensiveName} onChange={(event) => setComprehensiveName(event.target.value)} placeholder={t("exams.name")} /><input value={comprehensiveSubjects} onChange={(event) => setComprehensiveSubjects(event.target.value)} placeholder={t("exams.subjectsComma")} /><input type="date" value={comprehensiveDate} onChange={(event) => setComprehensiveDate(event.target.value)} /><button className="button primary small" onClick={saveComprehensiveExam} disabled={comprehensiveMutation.isPending}>{t("exams.add")}</button></div>{comprehensiveExams.length ? <div className="compact-list">{comprehensiveExams.map((exam) => <div className="compact-row" key={exam.id}><div><strong>{exam.name}</strong><span>{formatDate(exam.exam_date, language)} · {exam.subject.join(", ") || t("today.general")}</span></div><button className="button subtle small" onClick={() => comprehensiveRemove.mutate(exam.id)}>{t("exams.remove")}</button></div>)}</div> : <p className="muted">{t("exams.comprehensiveEmpty")}</p>}</section></div>;
 }
 
 function InvestmentPage() {

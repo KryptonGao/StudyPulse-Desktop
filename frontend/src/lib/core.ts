@@ -10,10 +10,21 @@ import type {
   BackupInspection,
   DiaryEntry,
   CapabilityManifest,
+  CoachAnalysis,
+  CoachChat,
+  CoachConversationMessage,
+  CoachData,
+  CoachGoal,
+  CoachProposal,
+  ComprehensiveExam,
   Exam,
+  ExamGoal,
+  ExamPlan,
+  ExamSimulation,
   FileEntry,
   Grade,
   ImportReport,
+  LearningReport,
   MistakeNote,
   ProviderStatus,
   SearchMatch,
@@ -70,6 +81,11 @@ export async function chooseBackupExportPath(title = "Export StudyPulse Backup")
   return (await save({ defaultPath: "StudyPulse-Backup.studypulsebackup", title })) ?? null;
 }
 
+export async function chooseReportExportPath(defaultPath: string, title = "Export StudyPulse Report"): Promise<string | null> {
+  if (!isDesktop) return null;
+  return (await save({ defaultPath, title })) ?? null;
+}
+
 export const core = {
   snapshot: () => command<AppSnapshot>("app_snapshot"),
   createWorkspace: (path: string) => command<Workspace>("create_workspace", { path }),
@@ -119,6 +135,32 @@ export const core = {
   exams: () => command<Exam[]>("get_exams"),
   upsertExam: (value: Exam) => command<void>("upsert_exam", { value }),
   deleteExam: (id: string) => command<void>("delete_exam", { id }),
+  comprehensiveExams: () => command<ComprehensiveExam[]>("get_comprehensive_exams"),
+  upsertComprehensiveExam: (value: ComprehensiveExam) => command<void>("upsert_comprehensive_exam", { value }),
+  deleteComprehensiveExam: (id: string) => command<void>("delete_comprehensive_exam", { id }),
+  coachData: async () => JSON.parse(await command<string>("get_coach_data_json")) as CoachData,
+  upsertCoachGoal: (value: CoachGoal) => command<void>("upsert_coach_goal", { value_json: JSON.stringify(value) }),
+  upsertCoachAnalysis: (value: CoachAnalysis) => command<void>("upsert_coach_analysis", { value_json: JSON.stringify(value) }),
+  upsertCoachProposal: (value: CoachProposal) => command<void>("upsert_coach_proposal", { value_json: JSON.stringify(value) }),
+  upsertCoachChat: (value: CoachChat) => command<void>("upsert_coach_chat", { value_json: JSON.stringify(value) }),
+  upsertCoachMessage: (value: CoachConversationMessage) => command<void>("upsert_coach_message", { value_json: JSON.stringify(value) }),
+  resolveCoachProposal: (proposalId: string, decision: "approve" | "reject", expectedGoalVersion: number) =>
+    command<string[]>("resolve_coach_proposal", { proposalId, decision, expectedGoalVersion }),
+  deleteCoachGoal: (id: string) => command<void>("delete_coach_goal", { id }),
+  examGoals: async (): Promise<ExamGoal[]> => (await command<string[]>("get_exam_goals_json")).map((value) => JSON.parse(value) as ExamGoal),
+  upsertExamGoal: (value: ExamGoal) => command<void>("upsert_exam_goal", { value_json: JSON.stringify(value) }),
+  deleteExamGoal: (id: string) => command<void>("delete_exam_goal", { id }),
+  examPlans: async (): Promise<ExamPlan[]> => (await command<string[]>("get_exam_plans_json")).map((value) => JSON.parse(value) as ExamPlan),
+  upsertExamPlan: (value: ExamPlan) => command<void>("upsert_exam_plan", { value_json: JSON.stringify(value) }),
+  deleteExamPlan: (id: string) => command<void>("delete_exam_plan", { id }),
+  examSimulations: async (): Promise<ExamSimulation[]> => (await command<string[]>("get_exam_simulations_json")).map((value) => JSON.parse(value) as ExamSimulation),
+  newExamSimulation: async (subject: string) => JSON.parse(await command<string>("new_exam_simulation", { subject })) as ExamSimulation,
+  upsertExamSimulation: (value: ExamSimulation) => command<void>("upsert_exam_simulation", { value_json: JSON.stringify(value) }),
+  deleteExamSimulation: (id: string) => command<void>("delete_exam_simulation", { id }),
+  learningReport: async (rangeDays: number) => JSON.parse(await command<string>("get_learning_report", { range_days: rangeDays })) as LearningReport,
+  writeReportFile: (path: string, extension: "md" | "html", contents: string) => command<void>("write_report_file", { path, extension, contents }),
+  writeReportAsset: (path: string, contentsBase64: string) => command<void>("write_report_asset", { path, contents_base64: contentsBase64 }),
+  shareReport: (path: string) => command<void>("share_report", { path }),
   studySessions: () => command<StudySession[]>("get_study_sessions"),
   investmentSubjects: () => command<TimeInvestmentSubject[]>("get_time_investment_subjects"),
   upsertInvestmentSubject: (value: TimeInvestmentSubject) => command<void>("upsert_time_investment_subject", { value }),

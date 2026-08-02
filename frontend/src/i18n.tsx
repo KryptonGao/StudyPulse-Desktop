@@ -142,9 +142,31 @@ const p1Ko: Record<string, string> = {
   "mistakes.enroll": "복습 대기열에 추가", "mistakes.easy": "쉬움",
 };
 
+const p2En: Record<string, string> = {
+  "exams.comprehensive": "Comprehensive exams", "exams.comprehensiveDescription": "Plan a combined exam across multiple subjects.", "exams.subjectsComma": "Subjects, comma separated", "exams.comprehensiveEmpty": "No comprehensive exams yet.",
+  "nav.coach": "AI Coach", "nav.simulation": "Exam Simulator", "nav.planner": "Reverse Planner", "nav.reports": "Reports",
+  "feature.providerRequired": "Connect Cloud AI or BYOK in Settings before generating or changing AI feature data.", "feature.saved": "Saved", "feature.draft": "Draft", "feature.working": "Working…", "common.send": "Send",
+  "coach.title": "AI Coach", "coach.description": "Turn a score goal into evidence, risks and reviewable task proposals.", "coach.goalTitle": "Goal title", "coach.subject": "Subject", "coach.baseline": "Baseline score", "coach.target": "Target score", "coach.fullScore": "Full score", "coach.weight": "Subject weight", "coach.minutes": "Daily minutes", "coach.purpose": "Purpose", "coach.constraints": "Constraints", "coach.saveGoal": "Save goal", "coach.generate": "Analyze & propose", "coach.prediction": "Predicted score", "coach.probability": "Success probability", "coach.risks": "Risks", "coach.reject": "Reject", "coach.approve": "Approve tasks", "coach.chat": "Coach conversation", "coach.chatDescription": "Conversation is kept with the Coach goal.", "coach.chatPlaceholder": "Ask your coach…",
+  "simulation.title": "Exam Simulator", "simulation.description": "A ten-question, twenty-minute session with autosave and behavior analysis.", "simulation.generate": "Generate 10 questions", "simulation.questions": "questions", "simulation.empty": "Generate a simulation to begin.", "simulation.start": "Start exam", "simulation.resume": "Resume exam", "simulation.previous": "Previous", "simulation.next": "Next", "simulation.submit": "Submit", "simulation.score": "Score", "simulation.answerPlaceholder": "Write your answer…",
+  "planner.title": "Reverse Planner", "planner.description": "Start with the target score and work backward through weak points and daily routes.", "planner.examName": "Exam name", "planner.currentScore": "Current score", "planner.targetScore": "Target score", "planner.saveGoal": "Save exam goal", "planner.generate": "Generate route", "planner.delete": "Delete", "planner.confirmDelete": "Delete this exam goal and its plan?", "planner.weakPoints": "Weak points", "planner.dailyTasks": "Daily route", "planner.empty": "Generate a plan to see weak points and daily tasks.", "planner.noGoal": "No exam goal yet", "planner.noGoalCopy": "Add an exam target above to build a route.",
+  "reports.title": "Learning Reports", "reports.export": "Export StudyPulse report", "reports.studyTime": "Study time", "reports.sessions": "Sessions", "reports.score": "Score rate", "reports.mood": "Mood", "reports.share": "Share / open file",
+  "mode.coach": "AI Coach", "mode.examSimulation": "Exam simulation", "mode.reversePlanner": "Reverse planner",
+};
+
+const p2ZhCN: Record<string, string> = {
+  "exams.comprehensive": "综合考试", "exams.comprehensiveDescription": "为多个科目组合的综合考试建立计划。", "exams.subjectsComma": "科目，用逗号分隔", "exams.comprehensiveEmpty": "还没有综合考试。",
+  "nav.coach": "AI 教练", "nav.simulation": "考试模拟", "nav.planner": "Reverse Planner", "nav.reports": "报告",
+  "feature.providerRequired": "请先在设置中连接 Cloud AI 或 BYOK，才能生成或修改 AI 功能数据。", "feature.saved": "已保存", "feature.draft": "草稿", "feature.working": "处理中…", "common.send": "发送",
+  "coach.title": "AI 教练", "coach.description": "把分数目标转成证据、风险和待审核任务建议。", "coach.goalTitle": "目标名称", "coach.subject": "科目", "coach.baseline": "基线分数", "coach.target": "目标分数", "coach.fullScore": "满分", "coach.weight": "科目权重", "coach.minutes": "每日分钟", "coach.purpose": "目的", "coach.constraints": "约束", "coach.saveGoal": "保存目标", "coach.generate": "分析并生成建议", "coach.prediction": "预测分数", "coach.probability": "达成概率", "coach.risks": "风险", "coach.reject": "拒绝", "coach.approve": "批准任务", "coach.chat": "教练对话", "coach.chatDescription": "对话会随 Coach 目标保存在本地。", "coach.chatPlaceholder": "问问你的教练…",
+  "simulation.title": "考试模拟器", "simulation.description": "10 道题、20 分钟，自动保存并分析考试行为。", "simulation.generate": "生成 10 道题", "simulation.questions": "道题", "simulation.empty": "生成一次模拟考试开始。", "simulation.start": "开始考试", "simulation.resume": "恢复考试", "simulation.previous": "上一题", "simulation.next": "下一题", "simulation.submit": "交卷", "simulation.score": "得分", "simulation.answerPlaceholder": "写下你的答案…",
+  "planner.title": "Reverse Planner", "planner.description": "从目标分数倒推薄弱点、阶段路线和每日任务。", "planner.examName": "考试名称", "planner.currentScore": "当前分数", "planner.targetScore": "目标分数", "planner.saveGoal": "保存考试目标", "planner.generate": "生成路线", "planner.delete": "删除", "planner.confirmDelete": "删除这个考试目标和计划吗？", "planner.weakPoints": "薄弱点", "planner.dailyTasks": "每日路线", "planner.empty": "生成计划后会显示薄弱点和每日任务。", "planner.noGoal": "还没有考试目标", "planner.noGoalCopy": "先在上方添加考试目标。",
+  "reports.title": "学习报告", "reports.export": "导出 StudyPulse 报告", "reports.studyTime": "学习时长", "reports.sessions": "学习 session", "reports.score": "成绩率", "reports.mood": "心情", "reports.share": "分享 / 打开文件",
+  "mode.coach": "AI 教练", "mode.examSimulation": "考试模拟", "mode.reversePlanner": "Reverse Planner",
+};
+
 const dictionaries: Record<Language, Record<string, string>> = {
-  en: { ...en, ...p1En },
-  "zh-CN": { ...zhCN, ...p1ZhCN },
+  en: { ...en, ...p1En, ...p2En },
+  "zh-CN": { ...zhCN, ...p1ZhCN, ...p2ZhCN },
   "zh-TW": { ...zhTW, ...p1ZhTW },
   ja: { ...ja, ...p1Ja },
   ko: { ...ko, ...p1Ko },
