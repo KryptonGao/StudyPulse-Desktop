@@ -6,8 +6,7 @@
 
 StudyPulse 是一个**本地优先的学习工作区桌面客户端**（macOS / Windows，Tauri 2 + React 19 + Rust Core）。任务、科目成绩、考试、错题、学习计时、学习日记、趋势分析、文字闪卡、资料库和 Agent 工作全部保存在用户选择的本地 Workspace 目录中。
 
-- 版本 `0.1.0`（`package.json`、`core/Cargo.toml` 的 `workspace.package.version`、`src-tauri/tauri.conf.json` 三处一致）。
-- 目标平台 macOS 15+ 与 Windows 10/11；`src-tauri/tauri.conf.json` 中 `macOS.minimumSystemVersion: "15.0"`，`core/.cargo/config.toml` 中 `MACOSX_DEPLOYMENT_TARGET=15.0`；`src-tauri/tauri.windows.conf.json` 定义 Windows 的 NSIS/MSI、`.ico` 与 WebView2 安装策略。
+
 - AI 连接可选：Cloud AI 或 BYOK（OpenAI-compatible）二选一，也可完全不连接。没有 AI 时本地学习记录功能完整可用。
 - 生产桌面应用**不依赖 Electron，也不对外提供浏览器 localhost 服务**。`npm run dev` 只是 Vite 前端预览，不能代替 Tauri 应用。
 
