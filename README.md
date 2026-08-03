@@ -2,7 +2,7 @@
 
 StudyPulse 是一个 **本地优先的学习工作区桌面客户端**。它把任务、科目成绩、考试、错题、学习计时、学习日记、Trends、文字闪卡、资料库和 Agent 工作放在同一个可迁移的本地 Workspace 中。
 
-当前客户端以 macOS MVP 为目标：使用 Tauri 承载 React 界面，使用 Rust Core 负责 Workspace、数据读写、备份、Agent 运行时和模型提供商连接。AI 连接是可选的；没有 AI 时，任务、考试、错题、计时和本地资料管理仍然可以使用。
+当前版本为 `0.3.1`，以 macOS MVP 为目标：使用 Tauri 承载 React 界面，使用 Rust Core 负责 Workspace、数据读写、备份、Agent 运行时和模型提供商连接。AI 连接是可选的；没有 AI 时，任务、考试、错题、计时和本地资料管理仍然可以使用。
 
 ## 当前能力
 
@@ -10,7 +10,7 @@ StudyPulse 是一个 **本地优先的学习工作区桌面客户端**。它把�
 
 - 创建或打开一个本地 StudyPulse Workspace。
 - 在 Today 页面查看未完成任务、今日学习时长、连续学习天数、待复习错题和即将到来的考试。
-- 管理任务、科目、成绩和考试记录。
+- 管理任务、科目、成绩、单科考试和综合考试记录。
 - 记录错题，将错题加入文字闪卡复习队列，并用 Again、Hard、Good、Easy 四档反馈推进 SM-2 复习状态。
 - 使用学习计时器开始、暂停、继续、完成或取消一个学习 session。
 - 创建时间投入主题，为学习时长分析保留结构化数据。
@@ -26,11 +26,21 @@ StudyPulse 是一个 **本地优先的学习工作区桌面客户端**。它把�
 - 以可见事件时间线展示 Agent 的阶段、状态、工具调用、产物和错误。
 - Agent 的写入、破坏性操作和代码执行会先请求确认；需要补充信息时会暂停等待用户输入。
 
+### AI Coach、考试规划与学习报告
+
+- **AI Coach**：保存分数目标、科目基线/目标、权重、每日可用时间、目的和约束；生成预测、证据、风险和可审核的学习任务建议。批准建议后才会写入任务，也可以围绕目标进行教练对话。
+- **Reverse Planner**：从考试日期、当前分数和目标分数倒推薄弱点、阶段路线和每日任务；生成时会把成绩、错题、SRS 到期队列和未完成任务作为上下文。
+- **Exam Simulator**：按科目生成默认 10 道题、20 分钟的模拟考试，支持选择题和简答题；自动保存作答，记录跳题、改答案和超时等行为，并在交卷后生成得分与行为分析。
+- **Learning Reports**：查看 7 天或 30 天的学习时长、session、成绩率、心情、每日趋势和考试/错题统计；可导出 Markdown、HTML、PNG，或使用系统打印生成 PDF，并打开/分享导出的文件。
+
+AI Coach、Reverse Planner 和 Exam Simulator 需要在 Settings 中连接 Cloud AI 或 BYOK；Learning Reports 使用本地 Workspace 数据，不依赖 AI。
+
 ### AI 提供商
 
 - **StudyPulse Cloud AI**：通过 `studypulse://auth/callback` 深链完成登录。
 - **BYOK**：配置任意 OpenAI-compatible endpoint、模型和 API key。
 - Cloud AI 与 BYOK 同时只能有一个处于 active 状态。
+- AI Coach、Reverse Planner 和 Exam Simulator 的生成与分析功能需要已连接的提供商；本地学习记录和 Learning Reports 不受影响。
 - AI 不连接时，Workspace 仍可作为独立的本地学习记录工具使用。
 
 ### 备份与恢复
@@ -204,4 +214,6 @@ npm run tauri:build
 
 ## 项目状态
 
-这是一个持续演进中的 macOS MVP。当前客户端优先覆盖本地 Workspace、基础学习记录、备份恢复和带权限确认的 Agent 主流程；更复杂的跨端同步、完整系统级日历/提醒集成、发布签名与分发流程不属于当前客户端的默认能力。
+这是一个持续演进中的 macOS MVP。当前客户端已覆盖本地 Workspace、学习记录与 SRS、P1 日记/趋势、备份恢复、AI Coach、考试规划/模拟、学习报告和带权限确认的 Agent 主流程。
+
+Health/Recovery 模块尚未包含在当前客户端中；跨端同步、完整系统级日历/提醒集成、发布签名与分发流程也不属于当前默认能力。AI 生成结果仍需用户审核，代码执行的本机 Python 后端也不是安全沙箱。
