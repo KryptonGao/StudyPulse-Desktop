@@ -1,0 +1,131 @@
+name: Build and Publish Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS Apple Silicon
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            tauri_args: --target aarch64-apple-darwin --bundles app,dmg
+            artifact_name: studypulse-macos-aarch64
+            artifact_path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - platform: Windows x86_64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            tauri_args: --bundles nsis
+            artifact_name: studypulse-windows-x64
+            artifact_path: src-tauri/target/release/bundle/nsis/*.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run TypeScript checks
+        run: npm run typecheck
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Build Tauri bundle
+        run: npm run tauri:build -- ${{ matrix.tauri_args }}
+
+      - name: Upload platform bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          pattern: studypulse-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Render Release Notes
+        run: node scripts/render-release-notes.mjs .github/release-template.md release-notes.md
+
+      - name: Resolve Release metadata
+        id: release
+        shell: bash
+        run: |
+          VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "title=v$VERSION - NEW Feature... [ macOS & Windows ]" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          mapfile -t assets < <(find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \))
+          if [ "${#assets[@]}" -ne 2 ]; then
+            echo "Expected exactly one .dmg and one .exe, found ${#assets[@]} asset(s)."
+            find release-assets -type f -print
+            exit 1
+          fi
+          printf '%s\n' "${assets[@]}"
+
+      - name: Create or update published Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          mapfile -t assets < <(find release-assets -type f \( -name '*.dmg' -o -name '*.exe' \))
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --target "$RELEASE_COMMIT" \
+              --title "$RELEASE_TITLE" \
+              --notes-file release-notes.md
+          fi
