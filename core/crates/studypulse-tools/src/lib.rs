@@ -1130,7 +1130,7 @@ fn execute_python_locally(args: &CodeExecutionArgs) -> Result<Value, ToolError> 
         .map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ToolError::Execution(
-                    "Python 3 was not found; install it with 'brew install python' or set STUDYPULSE_PYTHON".into(),
+                    "Python 3 was not found; install it or set STUDYPULSE_PYTHON to the executable path".into(),
                 )
             } else {
                 ToolError::Execution(format!("could not start local Python: {error}"))
@@ -1186,8 +1186,8 @@ fn execute_python_locally(args: &CodeExecutionArgs) -> Result<Value, ToolError> 
         .map(join_captured_output)
         .transpose()?
         .unwrap_or_default();
-    let stdout_text = String::from_utf8_lossy(&stdout.bytes).into_owned();
-    let stderr_text = String::from_utf8_lossy(&stderr.bytes).into_owned();
+    let stdout_text = normalize_process_output(&stdout.bytes);
+    let stderr_text = normalize_process_output(&stderr.bytes);
 
     Ok(json!({
         "ok": !timed_out && status.success(),
@@ -1203,23 +1203,42 @@ fn execute_python_locally(args: &CodeExecutionArgs) -> Result<Value, ToolError> 
     }))
 }
 
+fn normalize_process_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
 fn local_python_program() -> String {
     if let Ok(program) = std::env::var("STUDYPULSE_PYTHON")
         && !program.trim().is_empty()
     {
         return program;
     }
-    [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
-        "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
-        "/usr/bin/python3",
-    ]
-    .into_iter()
-    .find(|path| std::path::Path::new(path).is_file())
-    .unwrap_or("python3")
-    .into()
+
+    #[cfg(windows)]
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        for program in ["python.exe", "python3.exe", "py.exe"] {
+            if std::env::split_paths(&path).any(|directory| directory.join(program).is_file()) {
+                return program.into();
+            }
+        }
+        "python.exe".into()
+    }
+
+    #[cfg(not(windows))]
+    {
+        [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+            "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
+            "/usr/bin/python3",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .unwrap_or("python3")
+        .into()
+    }
 }
 
 struct LocalExecutionDirectory {

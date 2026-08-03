@@ -1,3 +1,5 @@
+#![cfg_attr(windows, allow(linker_messages))]
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{

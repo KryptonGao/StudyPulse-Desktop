@@ -2,7 +2,7 @@
 
 StudyPulse 是一个 **本地优先的学习工作区桌面客户端**。它把任务、科目成绩、考试、错题、学习计时、学习日记、Trends、文字闪卡、资料库和 Agent 工作放在同一个可迁移的本地 Workspace 中。
 
-当前版本为 `0.3.1`，以 macOS MVP 为目标：使用 Tauri 承载 React 界面，使用 Rust Core 负责 Workspace、数据读写、备份、Agent 运行时和模型提供商连接。AI 连接是可选的；没有 AI 时，任务、考试、错题、计时和本地资料管理仍然可以使用。
+当前版本为 `0.1.0`，支持 macOS 与 Windows 桌面端：使用 Tauri 承载 React 界面，使用 Rust Core 负责 Workspace、数据读写、备份、Agent 运行时和模型提供商连接。AI 连接是可选的；没有 AI 时，任务、考试、错题、计时和本地资料管理仍然可以使用。
 
 ## 当前能力
 
@@ -55,7 +55,7 @@ AI Coach、Reverse Planner 和 Exam Simulator 需要在 Settings 中连接 Cloud
 ```mermaid
 flowchart LR
     UI[React + TypeScript UI]
-    HOST[Tauri Host\ncommands · dialogs · deep link · Keychain]
+    HOST[Tauri Host\ncommands · dialogs · deep link · credential store]
     CORE[Rust Core\nWorkspace · Agent · Backup · Model Client]
     DATA[(Local Workspace)]
     AI[Cloud AI or\nOpenAI-compatible BYOK]
@@ -69,17 +69,18 @@ flowchart LR
 代码按职责分为三层：
 
 - `frontend/`：React 页面、国际化、Markdown 渲染和 Tauri command 调用封装。
-- `src-tauri/`：Tauri 应用宿主、文件选择器、深链回调、Keychain 凭据存取和前端命令边界。
+- `src-tauri/`：Tauri 应用宿主、文件选择器、深链回调、系统凭据存取和前端命令边界。
 - `core/`：Rust workspace，包含 Workspace 存储、Agent runtime、工具注册表、模型客户端、备份和 Runner。
 
 生产桌面应用不依赖 Electron，也不对外提供浏览器 localhost 服务。开发时的 `npm run dev` 只是 Vite 前端预览，不能代替 Tauri 应用运行。
 
 ## 环境要求
 
-- macOS 15 或更高版本
+- macOS 15 或更高版本，或 Windows 10/11
 - Rust 1.97.1 或更高版本
 - Node.js 24 或更高版本
 - npm 11 或更高版本
+- Windows 构建需要 Visual Studio 2022 Build Tools 的“使用 C++ 的桌面开发”工作负载和 WebView2 Runtime
 - Docker Desktop：仅在使用 Docker 代码执行后端时需要
 
 ## 快速开始
@@ -107,7 +108,13 @@ Vite 默认使用 `http://localhost:1420`。由于浏览器预览没有 Tauri ru
 npm run tauri:build
 ```
 
-Tauri 会先执行前端构建，再生成 macOS 应用及对应 bundle。
+Tauri 会先执行前端构建，再生成当前平台的应用 bundle。Windows 上可显式生成 NSIS 与 MSI 安装器：
+
+```powershell
+npm run tauri:build:windows
+```
+
+产物位于 `src-tauri/target/release/bundle/nsis/` 与 `src-tauri/target/release/bundle/msi/`。完整的 Windows 环境、迁移和签名说明见 [`docs/WINDOWS.md`](docs/WINDOWS.md)。
 
 ## AI 配置
 
@@ -181,7 +188,7 @@ Workspace 路径只保存在客户端偏好设置中；学习数据、Agent 运�
 ## 隐私与安全边界
 
 - 默认本地优先：不配置 AI 时，核心学习数据无需离开本机。
-- Cloud AI token 和 BYOK API key 由 macOS Keychain 保存，不写入 Workspace、前端 localStorage、日志或源代码。
+- Cloud AI token 和 BYOK API key 由系统安全凭据存储保存（macOS Keychain / Windows Credential Manager），不写入 Workspace、前端 localStorage、日志或源代码。
 - React 只接收脱敏后的 provider status，例如已连接状态、账户信息或 BYOK 的 endpoint/model 配置，不接收已保存的 API key。
 - Agent 工具按 Read、Write、Destructive、Execute 分级，并通过确认事件把需要用户决定的操作呈现出来。
 - Workspace 只允许访问其自身目录内的受支持文件；资料搜索会跳过隐藏文件、符号链接和非文本文件。
@@ -214,6 +221,6 @@ npm run tauri:build
 
 ## 项目状态
 
-这是一个持续演进中的 macOS MVP。当前客户端已覆盖本地 Workspace、学习记录与 SRS、P1 日记/趋势、备份恢复、AI Coach、考试规划/模拟、学习报告和带权限确认的 Agent 主流程。
+这是一个持续演进中的 macOS / Windows 桌面客户端。当前客户端已覆盖本地 Workspace、学习记录与 SRS、P1 日记/趋势、备份恢复、AI Coach、考试规划/模拟、学习报告和带权限确认的 Agent 主流程。
 
 Health/Recovery 模块尚未包含在当前客户端中；跨端同步、完整系统级日历/提醒集成、发布签名与分发流程也不属于当前默认能力。AI 生成结果仍需用户审核，代码执行的本机 Python 后端也不是安全沙箱。

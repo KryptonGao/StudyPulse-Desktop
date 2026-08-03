@@ -1,3 +1,5 @@
+#![cfg_attr(windows, allow(linker_messages))]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -116,10 +118,10 @@ impl AppState {
             preferences: Arc::new(Mutex::new(preferences)),
             byok_config: Arc::new(Mutex::new(None)),
         };
-        if let Some(path) = state.preferences_snapshot()?.workspace_path {
-            if Path::new(&path).is_dir() {
-                let _ = state.core.open_workspace(path);
-            }
+        if let Some(path) = state.preferences_snapshot()?.workspace_path
+            && Path::new(&path).is_dir()
+        {
+            let _ = state.core.open_workspace(path);
         }
         Ok(state)
     }
@@ -785,7 +787,9 @@ async fn share_report(path: String, state: State<'_, AppState>) -> Result<(), Ap
             return Err(AppError::InvalidInput { message: "cannot share a Workspace data file as a report".into() });
         }
     }
-    std::process::Command::new("open").arg(&candidate).status().map_err(|error| AppError::File { message: error.to_string() })?;
+    tauri_plugin_opener::open_path(&candidate, None::<&str>).map_err(|error| AppError::File {
+        message: error.to_string(),
+    })?;
     Ok(())
 }
 

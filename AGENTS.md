@@ -4,10 +4,9 @@
 
 ## 1. 项目概览
 
-StudyPulse 是一个**本地优先的学习工作区桌面客户端**（macOS MVP，Tauri 2 + React 19 + Rust Core）。任务、科目成绩、考试、错题、学习计时、学习日记、趋势分析、文字闪卡、资料库和 Agent 工作全部保存在用户选择的本地 Workspace 目录中。
+StudyPulse 是一个**本地优先的学习工作区桌面客户端**（macOS / Windows，Tauri 2 + React 19 + Rust Core）。任务、科目成绩、考试、错题、学习计时、学习日记、趋势分析、文字闪卡、资料库和 Agent 工作全部保存在用户选择的本地 Workspace 目录中。
 
-- 版本 `0.4.0`（`package.json`、`core/Cargo.toml` 的 `workspace.package.version`、`src-tauri/tauri.conf.json` 三处一致）。
-- 目标平台 macOS 15+；`src-tauri/tauri.conf.json` 中 `macOS.minimumSystemVersion: "15.0"`，`core/.cargo/config.toml` 中 `MACOSX_DEPLOYMENT_TARGET=15.0`。
+
 - AI 连接可选：Cloud AI 或 BYOK（OpenAI-compatible）二选一，也可完全不连接。没有 AI 时本地学习记录功能完整可用。
 - 生产桌面应用**不依赖 Electron，也不对外提供浏览器 localhost 服务**。`npm run dev` 只是 Vite 前端预览，不能代替 Tauri 应用。
 
@@ -24,7 +23,7 @@ flowchart LR
 | 目录 | 职责 | 关键文件 |
 |---|---|---|
 | `frontend/` | React 页面、i18n、Markdown 渲染、command 封装 | `src/app/App.tsx`（461 行，所有页面组件）、`src/app/P1Pages.tsx`（Diary/Trends/Flashcards）、`src/lib/core.ts`（command 封装）、`src/types.ts`（TS 类型）、`src/i18n.tsx`（5 语言字典）、`src/styles.css` |
-| `src-tauri/` | Tauri 宿主：command 注册、对话框、深链、Keychain | `src/lib.rs`（全部 command，约 1000 行 + 测试）、`tauri.conf.json`、`capabilities/default.json` |
+| `src-tauri/` | Tauri 宿主：command 注册、对话框、深链、系统凭据存储 | `src/lib.rs`（全部 command，约 1000 行 + 测试）、`tauri.conf.json`、`tauri.windows.conf.json`、`capabilities/default.json` |
 | `core/` | Rust workspace（edition 2024，rust-version 1.97.1，resolver 3） | 6 个 crate，见下 |
 
 `core/` 的 crate 划分：
@@ -192,7 +191,7 @@ StudyPulseWorkspace/
 ## 10. Tauri 宿主层（src-tauri/src/lib.rs）
 
 - `AppState`：`Arc<StudyPulseCore>` + `preferences.json`（app_config_dir，内容仅 `{workspace_path, provider}`）+ `byok_config` 内存缓存。启动时若 preferences 里有存在的 workspace 路径则自动 `open_workspace`。
-- **凭据只进 Keychain**（`keyring` crate）：Cloud token → service `space.chenkai.StudyPulse-Desktop.CloudAI`、account `session-token-pair`；BYOK → service `space.chenkai.StudyPulse-Desktop.BYOK`、account `openai-compatible`。**绝不写入 Workspace、localStorage、日志或序列化到前端**。
+- **凭据只进系统安全凭据存储**（`keyring` crate；macOS Keychain / Windows Credential Manager）：Cloud token → service `space.chenkai.StudyPulse-Desktop.CloudAI`、account `session-token-pair`；BYOK → service `space.chenkai.StudyPulse-Desktop.BYOK`、account `openai-compatible`。**绝不写入 Workspace、localStorage、日志或序列化到前端**。
 - 每个 command 是 `#[tauri::command]`，通过 `core_call`（`tauri::async_runtime::spawn_blocking`）执行，**禁止在 async command 里直接调用同步 Core 方法**（会阻塞主线程）。`read_command!` / `delete_command!` 两个宏覆盖简单 CRUD；所有 command 必须加进 `invoke_handler` 的 `generate_handler!` 列表（容易漏，改完 grep 确认）。
 - `AppError`：`#[serde(rename_all = "camelCase")]`，变体 Core/InvalidInput/Credentials/File/State；**`lib.rs` 内有测试守护错误序列化不泄露 secret 字段**——新增错误路径时保持。
 - 边界校验在宿主层再做一遍（不信任前端）：`import_library_file` 检查常规文件 + ≤ 1 MiB。
@@ -279,7 +278,7 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D war
 
 - **clippy 必须零警告**（`-D warnings`）。
 - Rust 测试用 `tempfile` 建临时 Workspace，不碰真实目录。
-- 完整桌面构建：`npm run tauri:build`（`beforeBuildCommand: npm run build`）。仅前端 `npm run build` 不产生桌面 bundle。
+- 完整桌面构建：`npm run tauri:build`（`beforeBuildCommand: npm run build`）。Windows 安装器使用 `npm run tauri:build:windows` 生成 NSIS 与 MSI。仅前端 `npm run build` 不产生桌面 bundle。
 - 浏览器预览 `npm run dev` 没有 Tauri runtime：除 `app_snapshot`（返回 null workspace）外的 command 全部抛错、对话框不可用——**验证功能必须 `npm run tauri:dev`**。
 
 ## 15. 分支与发布约定
@@ -300,6 +299,6 @@ cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets -- -D war
 7. **工具 prepare/execute 混做**：prepare 里执行副作用会破坏"先确认后执行"的安全模型（有测试守护）。
 8. **command 没注册**：`generate_handler!` 漏加 = 前端 invoke 直接报 "not found"。
 9. **async 里直接调同步 Core**：会阻塞 Tauri 事件循环，必须 `core_call`。
-10. **API key/token 流到前端**：凭据只经 Keychain；`ProviderStatus` 是脱敏视图，BYOK 的 api_key 从不出现。
+10. **API key/token 流到前端**：凭据只经系统安全凭据存储；`ProviderStatus` 是脱敏视图，BYOK 的 api_key 从不出现。
 11. **serde 字段重命名**：枚举默认序列化为变体名（PascalCase），需要时显式 `rename_all`（`lowercase`/`snake_case`），别依赖默认。
 12. **JSONL 信封格式**：`IosRecord<T>` 的 `value` 才是业务对象，读写都用信封辅助函数，不要手拼。
