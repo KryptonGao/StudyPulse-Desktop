@@ -11,7 +11,8 @@
     "typecheck": "tsc -b --pretty false",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
