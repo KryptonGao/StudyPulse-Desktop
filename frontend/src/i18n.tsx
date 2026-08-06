@@ -164,12 +164,30 @@ const p2ZhCN: Record<string, string> = {
   "mode.coach": "AI 教练", "mode.examSimulation": "考试模拟", "mode.reversePlanner": "Reverse Planner",
 };
 
+const interfaceStyleTranslations: Record<Language, Record<string, string>> = {
+  en: {
+    "settings.interfaceStyle": "Interface style", "settings.interfaceStyleDescription": "Choose the visual language for your workspace.", "style.anthropic": "Anthropic", "style.anthropicDescription": "Warm, editorial, reflective", "style.apple": "Apple", "style.appleDescription": "Clear, native, focused",
+  },
+  "zh-CN": {
+    "settings.interfaceStyle": "界面风格", "settings.interfaceStyleDescription": "选择工作区使用的视觉语言。", "style.anthropic": "Anthropic", "style.anthropicDescription": "温暖、编辑感、沉静", "style.apple": "Apple", "style.appleDescription": "清晰、原生、专注",
+  },
+  "zh-TW": {
+    "settings.interfaceStyle": "介面風格", "settings.interfaceStyleDescription": "選擇工作區使用的視覺語言。", "style.anthropic": "Anthropic", "style.anthropicDescription": "溫暖、編輯感、沉靜", "style.apple": "Apple", "style.appleDescription": "清晰、原生、專注",
+  },
+  ja: {
+    "settings.interfaceStyle": "インターフェーススタイル", "settings.interfaceStyleDescription": "ワークスペースの視覚的な雰囲気を選択します。", "style.anthropic": "Anthropic", "style.anthropicDescription": "温かく、編集的で、落ち着いた", "style.apple": "Apple", "style.appleDescription": "明快で、ネイティブで、集中しやすい",
+  },
+  ko: {
+    "settings.interfaceStyle": "인터페이스 스타일", "settings.interfaceStyleDescription": "워크스페이스의 시각 언어를 선택하세요.", "style.anthropic": "Anthropic", "style.anthropicDescription": "따뜻하고 편집적이며 차분함", "style.apple": "Apple", "style.appleDescription": "명확하고 네이티브하며 집중적",
+  },
+};
+
 const dictionaries: Record<Language, Record<string, string>> = {
-  en: { ...en, ...p1En, ...p2En },
-  "zh-CN": { ...zhCN, ...p1ZhCN, ...p2ZhCN },
-  "zh-TW": { ...zhTW, ...p1ZhTW },
-  ja: { ...ja, ...p1Ja },
-  ko: { ...ko, ...p1Ko },
+  en: { ...en, ...interfaceStyleTranslations.en, ...p1En, ...p2En },
+  "zh-CN": { ...zhCN, ...interfaceStyleTranslations["zh-CN"], ...p1ZhCN, ...p2ZhCN },
+  "zh-TW": { ...zhTW, ...interfaceStyleTranslations["zh-TW"], ...p1ZhTW },
+  ja: { ...ja, ...interfaceStyleTranslations.ja, ...p1Ja },
+  ko: { ...ko, ...interfaceStyleTranslations.ko, ...p1Ko },
 };
 
 function interpolate(template: string, variables?: Record<string, string | number>): string {
