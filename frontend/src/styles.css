@@ -58,7 +58,7 @@ h1, h2, h3, strong { letter-spacing: -0.025em; }
 .nav-item { display: flex; align-items: center; gap: 11px; width: 100%; padding: 10px 11px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); text-align: left; font-size: 13px; transition: background .18s, color .18s, transform .18s; }
 .nav-item:hover { background: var(--surface-muted); color: var(--ink); }
 .nav-item.active { background: color-mix(in srgb, var(--sage) 17%, transparent); color: var(--sage-dark); font-weight: 650; }
-.nav-icon { display: grid; width: 16px; place-items: center; font-size: 15px; }
+.nav-icon { width: 17px; height: 17px; flex: 0 0 auto; color: currentColor; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .sidebar-bottom { margin-top: auto; }
 .local-note { display: flex; align-items: center; gap: 8px; padding: 16px 11px 2px; color: var(--muted); font-size: 10px; }
 .main-column { min-width: 0; padding: 26px 36px 56px; }

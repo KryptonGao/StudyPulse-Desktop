@@ -16,26 +16,34 @@ import { CoachPage, ExamSimulationPage, ReportsPage, ReversePlannerPage } from "
 // navigation changes do not become persistence or Tauri command changes.
 type Page = "today" | "agent" | "tasks" | "subjects" | "exams" | "coach" | "simulation" | "planner" | "reports" | "mistakes" | "diary" | "trends" | "flashcards" | "timer" | "investment" | "library" | "settings";
 
+type SidebarIconName = "today" | "agent" | "tasks" | "subjects" | "exams" | "coach" | "simulation" | "planner" | "reports" | "mistakes" | "diary" | "trends" | "flashcards" | "timer" | "investment" | "library" | "settings";
+
+const sidebarIconSprite = new URL("../assets/sidebar-icons.svg", import.meta.url).href;
+
 // The sidebar is the source of truth for both labels and page selection.
 // A new page therefore needs an entry here as well as a render branch below.
-const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: string }[] = [
-  { id: "today", labelKey: "nav.today", icon: "✦" },
-  { id: "agent", labelKey: "nav.agent", icon: "⌁" },
-  { id: "tasks", labelKey: "nav.tasks", icon: "☑" },
-  { id: "subjects", labelKey: "nav.subjects", icon: "◫" },
-  { id: "exams", labelKey: "nav.exams", icon: "◷" },
-  { id: "coach", labelKey: "nav.coach", icon: "✧" },
-  { id: "simulation", labelKey: "nav.simulation", icon: "▹" },
-  { id: "planner", labelKey: "nav.planner", icon: "↗" },
-  { id: "reports", labelKey: "nav.reports", icon: "▤" },
-  { id: "mistakes", labelKey: "nav.mistakes", icon: "!" },
-  { id: "diary", labelKey: "nav.diary", icon: "◒" },
-  { id: "trends", labelKey: "nav.trends", icon: "⌁" },
-  { id: "flashcards", labelKey: "nav.flashcards", icon: "▣" },
-  { id: "timer", labelKey: "nav.timer", icon: "◴" },
-  { id: "investment", labelKey: "nav.investment", icon: "▥" },
-  { id: "library", labelKey: "nav.library", icon: "▤" },
+const navigation: { id: Exclude<Page, "settings">; labelKey: string; icon: SidebarIconName }[] = [
+  { id: "today", labelKey: "nav.today", icon: "today" },
+  { id: "agent", labelKey: "nav.agent", icon: "agent" },
+  { id: "tasks", labelKey: "nav.tasks", icon: "tasks" },
+  { id: "subjects", labelKey: "nav.subjects", icon: "subjects" },
+  { id: "exams", labelKey: "nav.exams", icon: "exams" },
+  { id: "coach", labelKey: "nav.coach", icon: "coach" },
+  { id: "simulation", labelKey: "nav.simulation", icon: "simulation" },
+  { id: "planner", labelKey: "nav.planner", icon: "planner" },
+  { id: "reports", labelKey: "nav.reports", icon: "reports" },
+  { id: "mistakes", labelKey: "nav.mistakes", icon: "mistakes" },
+  { id: "diary", labelKey: "nav.diary", icon: "diary" },
+  { id: "trends", labelKey: "nav.trends", icon: "trends" },
+  { id: "flashcards", labelKey: "nav.flashcards", icon: "flashcards" },
+  { id: "timer", labelKey: "nav.timer", icon: "timer" },
+  { id: "investment", labelKey: "nav.investment", icon: "investment" },
+  { id: "library", labelKey: "nav.library", icon: "library" },
 ];
+
+function SidebarIcon({ name }: { name: SidebarIconName }) {
+  return <svg className="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href={`${sidebarIconSprite}#${name}`} /></svg>;
+}
 
 function formatDate(value: string | null | undefined, language: string): string {
   // Core timestamps are ISO strings; the original value is retained when an
@@ -231,9 +239,9 @@ export default function App() {
         {/* The nav label is localized and exposed to assistive technology; the
             visible icon supplements the translated text rather than replacing it. */}
         <nav className="nav-list" aria-label={t("nav.aria")}>
-          {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}><span className="nav-icon">{item.icon}</span>{t(item.labelKey)}</button>)}
+          {navigation.map((item) => <button key={item.id} className={`nav-item ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}><SidebarIcon name={item.icon} />{t(item.labelKey)}</button>)}
         </nav>
-        <div className="sidebar-bottom"><button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => setPage("settings")}><span className="nav-icon">⚙</span>{t("nav.settings")}</button><div className="local-note"><span className="status-dot" /> {t("local.stored")}</div></div>
+        <div className="sidebar-bottom"><button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => setPage("settings")}><SidebarIcon name="settings" />{t("nav.settings")}</button><div className="local-note"><span className="status-dot" /> {t("local.stored")}</div></div>
       </aside>
       <main className="main-column">
         <header className="topbar"><div><p className="eyebrow">{page === "today" ? t("top.learningRhythm") : pageLabel(t, page)}</p><h1>{page === "today" ? t("top.greeting") : pageLabel(t, page)}</h1></div><div className="topbar-actions"><button className="button subtle" onClick={() => void importBackup()}>{t("top.importBackup")}</button><button className="button subtle" onClick={() => void exportBackup()}>{t("top.exportBackup")}</button><button className="avatar">{snapshot.data?.provider.cloud_account?.email?.slice(0, 1).toUpperCase() ?? "•"}</button></div></header>
