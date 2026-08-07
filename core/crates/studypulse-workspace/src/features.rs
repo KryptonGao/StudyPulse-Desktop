@@ -1,3 +1,20 @@
+//! Higher-level Coach, exam-simulation, and report values.
+//!
+//! These records still live in the Workspace's compatibility-oriented storage:
+//! typed values use camelCase plus flattened extras, Coach rows are serialized
+//! as Base64 JSON payloads, and validation rejects impossible links/bounds before
+//! a file is rewritten.  The helpers at the bottom keep model-output parsing
+//! deterministic and keep report calculations local to Workspace data.
+//!
+//! Coach records are intentionally heterogeneous on disk: each row has a kind,
+//! a Base64 payload, and flattened row extras. The typed `CoachData` aggregate
+//! is a convenience view, not a replacement format; unknown rows are preserved
+//! during a write. Exam simulations use bounded collections and explicit links
+//! so generated content cannot grow without limit or reference a missing item.
+//!
+//! Report helpers clamp caller ranges and use date prefixes only after the range
+//! has been derived from UTC. They summarize local facts; they do not call an
+//! AI provider or upload personal records.
 use std::collections::{BTreeMap, HashSet};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -9,10 +26,13 @@ use uuid::Uuid;
 use crate::{TaskItem, Workspace, WorkspaceError};
 
 fn now_string() -> String {
+    // Persist generated values in UTC with milliseconds, matching JSONL updates.
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn required(value: &str, field: &str) -> crate::Result<()> {
+    // Shared non-empty check keeps validation errors consistent across Coach and
+    // exam planning records while retaining the logical field name for callers.
     if value.trim().is_empty() {
         return Err(WorkspaceError::MalformedData {
             path: "Data/feature.jsonl".into(),
@@ -26,11 +46,14 @@ fn string_or_default<'de, D>(deserializer: D) -> std::result::Result<String, D::
 where
     D: serde::Deserializer<'de>,
 {
+    // Some early model responses emitted null for textual metadata; decode it
+    // as the empty compatibility value instead of failing the whole plan.
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Lifecycle state for a Coach goal.
 pub enum CoachGoalStatus {
     Active,
     Paused,
@@ -40,6 +63,7 @@ pub enum CoachGoalStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Per-subject baseline, target, scale, and contribution weight for a goal.
 pub struct CoachGoalSubject {
     pub id: Uuid,
     pub subject: String,
@@ -51,6 +75,8 @@ pub struct CoachGoalSubject {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// A versioned, date-bounded Coach objective with local planning constraints.
+/// Versioning lets analyses and proposals prove which goal definition they used.
 pub struct CoachGoal {
     pub id: Uuid,
     pub title: String,
@@ -76,10 +102,14 @@ pub struct CoachGoal {
 }
 
 impl CoachGoal {
+    /// Enforce usable goal text, a realistic daily-minute bound, and at least
+    /// one valid subject before a goal enters `coach_data.jsonl`.
     pub fn validate(&self) -> crate::Result<()> {
         required(&self.title, "goal title")?;
         required(&self.start_date, "startDate")?;
         required(&self.target_date, "targetDate")?;
+        // Minutes are constrained to one day because they are later used to
+        // generate daily tasks and must not overflow a calendar day.
         if self.daily_available_minutes <= 0 || self.daily_available_minutes > 24 * 60 {
             return Err(WorkspaceError::MalformedData {
                 path: "Data/coach_data.jsonl".into(),
@@ -92,6 +122,8 @@ impl CoachGoal {
                 detail: "coach goal must have a version and at least one subject".into(),
             });
         }
+        // Subject weights may be zero, but the scale must remain positive so a
+        // prediction can be normalized safely.
         for subject in &self.subjects {
             required(&subject.subject, "subject")?;
             if subject.full_score <= 0.0 || subject.weight < 0.0 {
@@ -107,6 +139,7 @@ impl CoachGoal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// A concise risk item attached to a Coach analysis.
 pub struct CoachRisk {
     pub id: Uuid,
     pub title: String,
@@ -116,6 +149,7 @@ pub struct CoachRisk {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Human-readable source detail supporting a generated analysis.
 pub struct CoachEvidence {
     pub source: String,
     pub detail: String,
@@ -123,6 +157,7 @@ pub struct CoachEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Subject-level prediction with bounds and sample-size context.
 pub struct CoachPrediction {
     pub subject: String,
     pub predicted: f64,
@@ -135,6 +170,7 @@ pub struct CoachPrediction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Versioned aggregate Coach decision and its evidence/risk payloads.
 pub struct CoachAnalysis {
     pub id: Uuid,
     #[serde(alias = "goalID")]
@@ -159,6 +195,8 @@ pub struct CoachAnalysis {
 }
 
 impl CoachAnalysis {
+    /// Validate only the invariants needed to interpret probability and goal
+    /// version; richer statistical semantics remain model/provider concerns.
     pub fn validate(&self) -> crate::Result<()> {
         if self.goal_version < 1 || !(0.0..=1.0).contains(&self.success_probability) {
             return Err(WorkspaceError::MalformedData {
@@ -172,6 +210,7 @@ impl CoachAnalysis {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Resolution state for a Coach proposal.
 pub enum CoachProposalStatus {
     Pending,
     Approved,
@@ -191,12 +230,14 @@ pub enum CoachStopCondition {
 }
 
 impl Default for CoachStopCondition {
+    // Empty text is the least surprising value for old rows without a condition.
     fn default() -> Self {
         Self::Text(String::new())
     }
 }
 
 impl CoachStopCondition {
+    /// Convert either wire representation into the task execution text.
     fn as_text(&self) -> String {
         match self {
             Self::Text(value) => value.clone(),
@@ -207,6 +248,7 @@ impl CoachStopCondition {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One proposed task generated from a Coach goal.
 pub struct CoachProposalItem {
     pub id: Uuid,
     pub title: String,
@@ -222,6 +264,7 @@ pub struct CoachProposalItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Versioned, expiring collection of proposed actions and rationale.
 pub struct CoachProposal {
     pub id: Uuid,
     #[serde(alias = "goalID")]
@@ -247,6 +290,7 @@ pub struct CoachProposal {
 }
 
 impl CoachProposal {
+    /// Validate the user-visible conclusion and each proposed task's bounds.
     pub fn validate(&self) -> crate::Result<()> {
         required(&self.conclusion, "proposal conclusion")?;
         if self.goal_version < 1 {
@@ -255,6 +299,8 @@ impl CoachProposal {
                 detail: "proposal goalVersion must be positive".into(),
             });
         }
+        // Keep item validation independent so one malformed generated task is
+        // reported before any proposal can be approved.
         for item in &self.items {
             required(&item.title, "proposal item title")?;
             if !(1..=5).contains(&item.importance) {
@@ -270,6 +316,7 @@ impl CoachProposal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Metadata for one Coach conversation.
 pub struct CoachChat {
     pub id: Uuid,
     #[serde(default, alias = "goalID")]
@@ -283,6 +330,7 @@ pub struct CoachChat {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One message linked to a Coach chat and optionally a goal.
 pub struct CoachConversationMessage {
     pub id: Uuid,
     #[serde(default, alias = "goalID")]
@@ -299,6 +347,7 @@ pub struct CoachConversationMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Physical JSONL row for Coach data; payload holds Base64-encoded typed JSON.
 pub struct CoachDataRow {
     pub kind: String,
     pub payload: String,
@@ -307,6 +356,8 @@ pub struct CoachDataRow {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+/// Typed Coach view assembled from heterogeneous physical rows.
+/// Unknown rows and row extras are retained so read/write is forward-compatible.
 pub struct CoachData {
     pub goals: Vec<CoachGoal>,
     pub analyses: Vec<CoachAnalysis>,
@@ -318,12 +369,17 @@ pub struct CoachData {
 }
 
 impl CoachData {
+    /// Validate typed rows and their goal/chat foreign-key relationships before
+    /// the heterogeneous collections are encoded back into JSONL.
     pub fn validate(&self) -> crate::Result<()> {
+        // UUID sets make relationship checks independent of collection order.
         let goal_ids: HashSet<_> = self.goals.iter().map(|value| value.id).collect();
         let proposal_ids: HashSet<_> = self.proposals.iter().map(|value| value.id).collect();
         for goal in &self.goals {
             goal.validate()?;
         }
+        // Analyses must point to an existing goal version; otherwise a displayed
+        // probability would be impossible to explain to the user.
         for analysis in &self.analyses {
             analysis.validate()?;
             if !goal_ids.contains(&analysis.goal_id) {
@@ -333,6 +389,8 @@ impl CoachData {
                 });
             }
         }
+        // Approved proposals need concrete task items because approval is the
+        // handoff point to user-confirmed task creation.
         for proposal in &self.proposals {
             proposal.validate()?;
             if !goal_ids.contains(&proposal.goal_id) {
@@ -348,6 +406,7 @@ impl CoachData {
                 });
             }
         }
+        // A chat may be general (`None`) but an optional goal link must resolve.
         for chat in &self.chats {
             if let Some(goal_id) = chat.goal_id
                 && !goal_ids.contains(&goal_id)
@@ -358,6 +417,8 @@ impl CoachData {
                 });
             }
         }
+        // Messages are kept subordinate to a known chat to avoid orphaned
+        // conversation rows after goal deletion.
         for message in &self.messages {
             if !self.chats.iter().any(|chat| chat.id == message.chat_id) {
                 return Err(WorkspaceError::MalformedData {
@@ -366,6 +427,8 @@ impl CoachData {
                 });
             }
         }
+        // Keep the proposal ID set available for future proposal-message links;
+        // the current wire contract does not require such a relationship.
         let _ = proposal_ids;
         Ok(())
     }
@@ -373,6 +436,7 @@ impl CoachData {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Exam target used by the reverse planner.
 pub struct ExamGoal {
     pub id: Uuid,
     pub exam_name: String,
@@ -389,9 +453,12 @@ pub struct ExamGoal {
 }
 
 impl ExamGoal {
+    /// Validate score bounds against the declared full score.
     pub fn validate(&self) -> crate::Result<()> {
         required(&self.exam_name, "examName")?;
         required(&self.subject, "subject")?;
+        // Both current and target scores use the same full-score scale; reject
+        // NaN/negative/out-of-scale values before planning math sees them.
         if self.full_score <= 0.0
             || self.current_score < 0.0
             || self.current_score > self.full_score
@@ -409,6 +476,7 @@ impl ExamGoal {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One topic-level weakness ranked by mastery and possible score gain.
 pub struct ExamWeakPoint {
     pub id: Uuid,
     pub topic: String,
@@ -419,6 +487,7 @@ pub struct ExamWeakPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Named phase in a reverse-planned study schedule.
 pub struct ExamPlanPhase {
     pub id: Uuid,
     pub name: String,
@@ -428,6 +497,7 @@ pub struct ExamPlanPhase {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One dated task generated for an exam-plan day offset.
 pub struct DailyExamTask {
     pub id: Uuid,
     pub day_offset: i64,
@@ -440,6 +510,7 @@ pub struct DailyExamTask {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Reverse-planner output persisted alongside its source exam goal.
 pub struct ExamPlan {
     pub id: Uuid,
     #[serde(alias = "examGoalID")]
@@ -460,8 +531,11 @@ pub struct ExamPlan {
 }
 
 impl ExamPlan {
+    /// Validate summary text and every weak-point bound before persistence.
     pub fn validate(&self) -> crate::Result<()> {
         required(&self.summary, "plan summary")?;
+        // Mastery is a rate, possible gain is non-negative, and priority starts
+        // at one so downstream sorting has no special zero case.
         for point in &self.weak_points {
             if !(0.0..=1.0).contains(&point.mastery)
                 || point.possible_score_gain < 0.0
@@ -479,6 +553,7 @@ impl ExamPlan {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// State machine for a generated exam simulation.
 pub enum ExamSimulationStatus {
     Preparing,
     Running,
@@ -491,6 +566,7 @@ pub enum ExamSimulationStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Supported generated-question formats.
 pub enum ExamQuestionKind {
     MultipleChoice,
     FreeResponse,
@@ -498,6 +574,7 @@ pub enum ExamQuestionKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Immutable question definition used by a simulation.
 pub struct ExamQuestion {
     pub id: Uuid,
     pub kind: ExamQuestionKind,
@@ -513,6 +590,7 @@ pub struct ExamQuestion {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Per-question interaction metrics and final answer/score state.
 pub struct ExamQuestionRecord {
     pub question_id: Uuid,
     pub first_viewed_at: Option<String>,
@@ -530,6 +608,7 @@ pub struct ExamQuestionRecord {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// User interaction event retained for timing and behavior analysis.
 pub enum ExamSimulationEventKind {
     Started,
     QuestionEntered,
@@ -543,6 +622,7 @@ pub enum ExamSimulationEventKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Timestamped simulation event with optional question context.
 pub struct ExamSimulationEvent {
     pub id: Uuid,
     pub kind: ExamSimulationEventKind,
@@ -556,6 +636,7 @@ pub struct ExamSimulationEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Provider-generated role analysis with bounded evidence and strategy lists.
 pub struct ExamRoleAnalysis {
     pub role: String,
     pub confidence: f64,
@@ -568,6 +649,8 @@ pub struct ExamRoleAnalysis {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Complete simulator state, including questions, interaction events, and the
+/// optional post-grading analysis.
 pub struct ExamSimulation {
     pub id: Uuid,
     pub subject: String,
@@ -590,28 +673,40 @@ pub struct ExamSimulation {
 }
 
 impl ExamSimulation {
+    /// Validate simulation size, question/answer links, terminal timestamps,
+    /// and the bounded shape of optional behavior analysis.
     pub fn validate(&self) -> crate::Result<()> {
         required(&self.subject, "subject")?;
+        // A simulation must fit in one day; the upper bound also protects timer
+        // calculations from unrealistic generated values.
         if self.duration_seconds <= 0 || self.duration_seconds > 24 * 60 * 60 {
             return Err(WorkspaceError::MalformedData {
                 path: "Data/exam_simulations.jsonl".into(),
                 detail: "durationSeconds is out of bounds".into(),
             });
         }
+        // The 100-item safety cap covers partial/legacy data; generated exams
+        // are narrowed further to exactly ten questions below.
         if self.questions.len() > 100 || self.question_records.len() > 100 {
             return Err(WorkspaceError::MalformedData {
                 path: "Data/exam_simulations.jsonl".into(),
                 detail: "simulation contains too many questions".into(),
             });
         }
+        // An empty list is valid during Preparing; once generated, the product
+        // contract is a fixed ten-question simulation.
         if !self.questions.is_empty() && self.questions.len() != 10 {
             return Err(WorkspaceError::MalformedData {
                 path: "Data/exam_simulations.jsonl".into(),
                 detail: "a generated simulation must contain exactly 10 questions".into(),
             });
         }
+        // The ID set prevents orphan answer records and keeps grading joins
+        // deterministic even if question order changes.
         let question_ids: HashSet<_> = self.questions.iter().map(|value| value.id).collect();
         for question in &self.questions {
+            // Every question needs prompt/points, and multiple choice needs at
+            // least two options so the UI can render a meaningful choice.
             required(&question.prompt, "question prompt")?;
             if question.points <= 0.0 {
                 return Err(WorkspaceError::MalformedData {
@@ -627,6 +722,8 @@ impl ExamSimulation {
             }
         }
         for record in &self.question_records {
+            // Records may be partial while the simulation is running, but their
+            // question IDs must already belong to the generated question set.
             if !question_ids.contains(&record.question_id) {
                 return Err(WorkspaceError::MalformedData {
                     path: "Data/exam_simulations.jsonl".into(),
@@ -637,6 +734,7 @@ impl ExamSimulation {
                 });
             }
         }
+        // Terminal states need an end instant for resume/report calculations.
         if matches!(
             self.status,
             ExamSimulationStatus::Completed | ExamSimulationStatus::AnalysisFailed
@@ -647,6 +745,8 @@ impl ExamSimulation {
                 detail: "completed simulation must have endedAt".into(),
             });
         }
+        // Provider analysis is optional, but when present its evidence and
+        // strategy list sizes are bounded to keep generated output reviewable.
         if let Some(analysis) = &self.analysis
             && (!(0.0..=1.0).contains(&analysis.confidence)
                 || !(2..=4).contains(&analysis.evidence.len())
@@ -663,6 +763,7 @@ impl ExamSimulation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Structured response expected from Coach analysis generation.
 pub struct CoachAnalysisResponse {
     pub conclusion: String,
     pub rationale: String,
@@ -691,6 +792,7 @@ pub struct CoachAnalysisResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Structured grading response for an exam simulation.
 pub struct ExamGradeResponse {
     pub total_score: f64,
     pub analysis: ExamRoleAnalysis,
@@ -700,6 +802,7 @@ pub struct ExamGradeResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One graded question result with optional feedback.
 pub struct ExamQuestionResult {
     pub question_id: Uuid,
     pub is_correct: bool,
@@ -710,6 +813,7 @@ pub struct ExamQuestionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Structured reverse-planner response before it is attached to an ExamGoal.
 pub struct ReversePlannerResponse {
     pub improvement_target: f64,
     pub summary: String,
@@ -721,8 +825,12 @@ pub struct ReversePlannerResponse {
 }
 
 pub fn parse_structured_json<T: for<'de> Deserialize<'de>>(raw: &str) -> crate::Result<T> {
+    // Providers often wrap JSON in Markdown fences. Strip only the outer fence
+    // so the typed decoder remains the source of truth for the actual schema.
     let value = raw.trim();
     let value = if let Some(stripped) = value.strip_prefix("```json") {
+        // Prefer the explicit JSON fence, then accept a generic fence emitted
+        // by providers that omit the language tag.
         stripped.strip_suffix("```").unwrap_or(stripped).trim()
     } else if let Some(stripped) = value.strip_prefix("```") {
         stripped.strip_suffix("```").unwrap_or(stripped).trim()
@@ -736,6 +844,8 @@ pub fn parse_structured_json<T: for<'de> Deserialize<'de>>(raw: &str) -> crate::
 }
 
 pub fn default_simulation(subject: String, now: Option<String>) -> ExamSimulation {
+    // Keep creation deterministic when a caller supplies a timestamp, while
+    // defaulting new simulations to the product's 20-minute preparation state.
     ExamSimulation {
         id: Uuid::new_v4(),
         subject,
@@ -756,6 +866,7 @@ pub fn default_simulation(subject: String, now: Option<String>) -> ExamSimulatio
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// One day in the local learning report, with averaged diary dimensions.
 pub struct DailyReportPoint {
     pub date: String,
     pub study_minutes: i64,
@@ -766,6 +877,7 @@ pub struct DailyReportPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+/// Bounded aggregate report built entirely from Workspace records.
 pub struct LearningReport {
     pub range_days: i64,
     pub from_date: String,
@@ -788,23 +900,33 @@ pub struct LearningReport {
 }
 
 pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<LearningReport> {
+    // Clamp the report horizon before reading records; the resulting date keys
+    // are also used as the single filter predicate for every domain.
     let days = range_days.clamp(1, 366);
+    // Reports use one current UTC date for all domains so sessions, diaries,
+    // grades, mistakes, and exams cannot straddle different local horizons.
     let end = Utc::now().date_naive();
     let start = end - chrono::Days::new((days - 1) as u64);
     let from_date = start.to_string();
     let to_date = end.to_string();
     let from_date_for_filter = from_date.clone();
     let to_date_for_filter = to_date.clone();
+    // Stored timestamps are RFC3339, so their first ten bytes are the canonical
+    // YYYY-MM-DD key used by the report buckets.
     let in_range = |value: &str| {
         let key = value.get(..10).unwrap_or(value);
         key >= from_date_for_filter.as_str() && key <= to_date_for_filter.as_str()
     };
+    // Read every source through Workspace validation before deriving aggregates;
+    // the report never opens files directly or performs network work.
     let sessions = workspace.read_study_sessions()?;
     let grades = workspace.read_grades()?;
     let mistakes = workspace.read_mistakes()?;
     let exams = workspace.read_exams()?;
     let comprehensive_exams = workspace.read_comprehensive_exams()?;
     let diaries = workspace.read_diary_entries()?;
+    // Pre-seed all days so the report is continuous even when no session was
+    // recorded on an intermediate date.
     let mut daily: BTreeMap<String, DailyReportPoint> = (0..days)
         .map(|offset| {
             let date = (start + chrono::Days::new(offset as u64)).to_string();
@@ -820,9 +942,13 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
             )
         })
         .collect();
+    // Session totals and intensity distribution use completed and incomplete
+    // records consistently with the existing report contract.
     let mut total_seconds = 0;
     let mut intensity_distribution = BTreeMap::new();
     for session in sessions.iter().filter(|value| in_range(&value.start_date)) {
+        // Duration is clamped at zero for resilient reporting of old data, while
+        // the displayed session count remains a count of source records.
         let key = session
             .start_date
             .get(..10)
@@ -840,6 +966,8 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
     let mut score_sum = 0.0;
     let mut score_count = 0;
     for grade in grades.iter().filter(|value| in_range(&value.date)) {
+        // Subject distribution counts records, not score points, so it measures
+        // where the learner has generated evidence in this period.
         *subject_distribution
             .entry(grade.subject.clone())
             .or_insert(0) += 1;
@@ -849,6 +977,8 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
         }
     }
     for mistake in mistakes.iter().filter(|value| in_range(&value.date)) {
+        // Untagged mistakes still count globally but cannot be assigned to a
+        // subject bucket.
         if !mistake.subject.is_empty() {
             *subject_distribution
                 .entry(mistake.subject.clone())
@@ -859,6 +989,7 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
     let mut energy_sum = 0.0;
     let mut diary_count = 0;
     for diary in diaries.iter().filter(|value| in_range(&value.date)) {
+        // Store running sums in the daily point and divide once after the loop.
         let key = diary.date.get(..10).unwrap_or(&diary.date);
         if let Some(point) = daily.get_mut(key) {
             point.mood_score = Some(point.mood_score.unwrap_or(0.0) + diary.mood_score as f64);
@@ -869,6 +1000,8 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
         energy_sum += diary.energy_score as f64;
         diary_count += 1;
     }
+    // Diary values are accumulated first and divided by that day's entry count
+    // after all records have been visited.
     for point in daily.values_mut() {
         let count = diaries
             .iter()
@@ -881,10 +1014,14 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
             point.energy_score = point.energy_score.map(|value| value / count as f64);
         }
     }
+    // Subject frequency is based on grades plus tagged mistakes; weakest score
+    // uses normalized grades only because mistakes have no score denominator.
     let top_subject = subject_distribution
         .iter()
         .max_by_key(|(_, count)| *count)
         .map(|(name, _)| name.clone());
+    // Weakest subject is the minimum normalized grade, not the lowest raw score
+    // because subjects may use different full-score scales.
     let weakest_subject = grades
         .iter()
         .filter(|value| in_range(&value.date))
@@ -895,6 +1032,8 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(name, _)| name);
+    // Keep report fields derived from the same filtered source arrays so totals
+    // and per-day points cannot drift apart.
     Ok(LearningReport {
         range_days: days,
         from_date,
@@ -941,11 +1080,15 @@ pub fn learning_report(workspace: &Workspace, range_days: i64) -> crate::Result<
 }
 
 pub fn coach_row_payload<T: Serialize>(kind: &str, value: &T) -> crate::Result<Value> {
+    // This helper exposes the physical iOS row shape for callers that need a
+    // JSON Value; the typed `make_coach_row` below is used for persistence.
     let payload = serde_json::to_vec(value)?;
     Ok(serde_json::json!({ "kind": kind, "payload": STANDARD.encode(payload) }))
 }
 
 pub fn decode_coach_payload<T: for<'de> Deserialize<'de>>(row: &CoachDataRow) -> crate::Result<T> {
+    // Decode in the reverse order of `make_coach_row`: Base64 first, typed JSON
+    // second, with a domain-specific malformed-data path for UI diagnostics.
     let bytes = STANDARD
         .decode(&row.payload)
         .map_err(|error| WorkspaceError::MalformedData {
@@ -959,6 +1102,8 @@ pub fn decode_coach_payload<T: for<'de> Deserialize<'de>>(row: &CoachDataRow) ->
 }
 
 pub fn make_coach_row<T: Serialize>(kind: &str, value: &T) -> crate::Result<CoachDataRow> {
+    // Coach rows keep typed JSON opaque inside Base64 to match the iOS storage
+    // contract and to allow heterogeneous kinds in one JSONL file.
     let payload = serde_json::to_vec(value)?;
     Ok(CoachDataRow {
         kind: kind.into(),
@@ -968,6 +1113,8 @@ pub fn make_coach_row<T: Serialize>(kind: &str, value: &T) -> crate::Result<Coac
 }
 
 pub fn validate_report_range(range_days: i64) -> crate::Result<()> {
+    // Keep the public validation explicit even though `learning_report` clamps
+    // internally; host callers receive a clear error for invalid UI input.
     if !(1..=366).contains(&range_days) {
         return Err(WorkspaceError::MalformedData {
             path: "report".into(),
@@ -978,6 +1125,10 @@ pub fn validate_report_range(range_days: i64) -> crate::Result<()> {
 }
 
 pub fn expired(expires_at: &str) -> bool {
+    // Malformed expiry is treated as expired (fail closed) rather than keeping
+    // an unparseable proposal active.
+    // Convert offsets to UTC before comparison so textual hours cannot change
+    // the proposal's actual expiry instant.
     DateTime::parse_from_rfc3339(expires_at)
         .map(|value| value.with_timezone(&Utc) < Utc::now())
         .unwrap_or(true)
@@ -987,12 +1138,19 @@ pub fn proposal_task(
     proposal: &CoachProposal,
     item: &CoachProposalItem,
 ) -> crate::Result<TaskItem> {
+    // Convert a proposal item into the existing task contract without writing
+    // it. The caller can then show/confirm the task before the normal upsert.
+    // Date-only proposals receive the default morning time; full timestamps are
+    // retained as supplied by the provider.
     let due = if item.start_date.contains('T') {
         item.start_date.clone()
     } else {
         format!("{}T09:00:00Z", item.start_date)
     };
     let stop_condition = item.stop_condition.as_text();
+    // Keep the execution context in the task's validated Base64 field so the
+    // Agent can resume the Coach intent without adding ad-hoc task columns.
+    // Serialize only after the due date and stop-condition text are normalized.
     let execution = serde_json::json!({ "objective": item.objective, "stopCondition": stop_condition, "coachGoalId": proposal.goal_id, "coachProposalId": proposal.id });
     Ok(TaskItem {
         id: Uuid::new_v4(),
@@ -1021,6 +1179,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    // Coach rows retain the iOS kind/Base64 payload contract through decode and
+    // re-encode, including the typed goal value.
     fn coach_rows_keep_ios_base64_payload_shape() {
         let goal = CoachGoal {
             id: Uuid::new_v4(),
@@ -1053,6 +1213,8 @@ mod tests {
     }
 
     #[test]
+    // Model output may be fenced, but arbitrary non-JSON must fail closed with a
+    // structured-output path instead of being guessed.
     fn structured_json_rejects_non_json_and_accepts_fenced_json() {
         let parsed: CoachAnalysisResponse = parse_structured_json("```json\n{\"conclusion\":\"ok\",\"rationale\":\"evidence\",\"shouldContinue\":true}\n```").unwrap();
         assert_eq!(parsed.conclusion, "ok");
@@ -1060,6 +1222,7 @@ mod tests {
     }
 
     #[test]
+    // Goal/analysis aliases used by Swift payloads remain accepted on decode.
     fn ios_coach_id_coding_keys_are_accepted() {
         let exam_id = Uuid::new_v4();
         let comprehensive_id = Uuid::new_v4();
@@ -1082,6 +1245,7 @@ mod tests {
     }
 
     #[test]
+    // New simulations start in Preparing with the fixed product duration.
     fn simulation_defaults_to_twenty_minutes() {
         let simulation = default_simulation("Physics".into(), Some("2026-08-02T00:00:00Z".into()));
         assert_eq!(simulation.duration_seconds, 1_200);
@@ -1090,6 +1254,8 @@ mod tests {
     }
 
     #[test]
+    // Report generation seeds an inclusive daily range even when Workspace data
+    // has no sessions, so empty charts remain structurally stable.
     fn empty_report_has_stable_daily_boundaries() {
         let temp = tempdir().unwrap();
         let workspace = Workspace::create(temp.path()).unwrap();

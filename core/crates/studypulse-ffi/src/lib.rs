@@ -32,8 +32,30 @@ use studypulse_workspace::{
 };
 use thiserror::Error;
 
+// This crate is the single UniFFI facade over the Rust core.  DTOs are the
+// stable Swift/desktop boundary; internal Workspace, Agent, and provider types
+// never cross it directly.  Conversion code below preserves existing wire
+// names, optionality, validation, and `extra_json` compatibility fields.
+//
+// The facade also owns process-local coordination for Agent runs, timers, and
+// backup inspections.  Those state machines are guarded by Mutex/Atomics and
+// are intentionally not persisted as Workspace records.
+//
+// This boundary is deliberately boring: validation and conversion are visible,
+// while side effects remain in typed core methods.
+// That separation is the main invariant of this crate.
+// DTOs stay owned, typed, and explicit.
+
 uniffi::setup_scaffolding!();
 
+// The facade keeps Rust ownership on the core side and exposes only owned
+// records, strings, vectors, and enums that UniFFI can generate safely.  No
+// method returns a Workspace reference, provider client, mutex, or raw secret;
+// those implementation details remain behind this boundary for every client.
+
+// UniFFI exposes one transportable error shape.  Detailed Rust errors are
+// converted to a message here so Swift does not need to understand six crate
+// error enums, while secret-bearing values remain outside this conversion path.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum CoreError {
     #[error("{message}")]
@@ -41,6 +63,8 @@ pub enum CoreError {
 }
 
 impl CoreError {
+    // Centralizing the fold keeps every facade method consistent and avoids
+    // accidental serialization of an internal error object or credential.
     fn message(error: impl std::fmt::Display) -> Self {
         Self::Failure {
             message: error.to_string(),
@@ -48,6 +72,9 @@ impl CoreError {
     }
 }
 
+// WorkspaceDto identifies the opened local store.  It contains location and
+// schema metadata only; provider credentials and Agent transcript state are not
+// embedded in this record.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct WorkspaceDto {
     pub id: String,
@@ -60,6 +87,10 @@ pub struct CloudAuthTokensDto {
     pub access_token: String,
     pub refresh_token: String,
 }
+
+// Token DTOs are used only by explicit authentication handoff methods.  The
+// desktop Tauri host stores them in the system credential vault and does not
+// serialize them into Workspace preferences or ordinary UI state.
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct CloudAccountDto {
@@ -77,12 +108,22 @@ pub struct ByokConfigDto {
     pub model: String,
 }
 
+// BYOK configuration intentionally contains reconnectable endpoint metadata,
+// never the API key.  This distinction is repeated in the conversion below so
+// a harmless-looking status method cannot become a secret exfiltration path.
+
+// Simple enums are explicit FFI values rather than Rust domain enums.  The
+// conversion implementations later keep Swift spelling stable even if the
+// internal model gains fields or variants.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum TaskTypeDto {
     Homework,
     Reading,
 }
 
+// Task DTOs retain the front-end snake_case convention and the opaque
+// `extra_json` extension point.  TryFrom validates/parses these values before
+// any Workspace write; From performs the reverse, lossless projection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct TaskDto {
     pub id: String,
@@ -104,6 +145,13 @@ pub struct TaskDto {
     pub extra_json: String,
 }
 
+// Record DTOs use the frontend's established snake_case field names even though
+// the underlying Workspace serde models use camelCase.  The FFI layer is the
+// explicit translation point, keeping each client from maintaining its own
+// fragile field-name map.
+
+// Subject and phase records form the planning layer.  Nested goals remain DTOs
+// so the Swift boundary does not depend on Rust collection or UUID types.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct SubjectDto {
     pub id: String,
@@ -154,8 +202,14 @@ pub struct GradeDto {
     pub extra_json: String,
 }
 
+// Diary, review, and mistake DTOs carry the learning-history side of the model.
+// ReviewState is optional by design: `None` means a mistake is not enrolled in
+// the SRS queue, not that its history is malformed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct DiaryEntryDto {
+    // Diary values are transported as validated scalar snapshots.  The FFI
+    // record preserves the stored date/time strings so all clients observe the
+    // same UTC/localization boundary defined by Workspace.
     pub id: String,
     pub date: String,
     pub mood_score: i64,
@@ -179,6 +233,8 @@ pub struct ReviewStateDto {
     pub extra_json: String,
 }
 
+// History entries are kept as separate records so Swift can render and edit
+// them without knowing the storage envelope or serde flattening rules.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct MasteryHistoryEntryDto {
     pub id: String,
@@ -224,6 +280,9 @@ pub struct MistakeNoteDto {
     pub extra_json: String,
 }
 
+// Exam DTOs preserve the nested checklist/time-slot/review shape used by the
+// Workspace.  Optional fields are compatibility boundaries for older records,
+// so conversion must not replace missing values with fabricated data.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ExamTimeSlotDto {
     pub start_time: String,
@@ -254,6 +313,9 @@ pub struct ExamReviewDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ExamDto {
+    // Exam projections keep planning and review data nested but explicit.  This
+    // avoids re-parsing an opaque JSON document in Swift and keeps optional
+    // checklist/review sections distinguishable from empty values.
     pub id: String,
     pub name: String,
     pub exam_date: String,
@@ -288,6 +350,9 @@ pub struct ComprehensiveExamDto {
     pub extra_json: String,
 }
 
+// Routines and instances share an explicit enum plus date keys.  The facade
+// passes their validation to Workspace rather than reimplementing persistence
+// semantics in Swift.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum RoutineTypeDto {
     MistakeReview,
@@ -327,6 +392,8 @@ pub struct RoutineInstanceDto {
     pub extra_json: String,
 }
 
+// Study-session source/intensity values describe provenance and effort, while
+// the records below keep optional physiological annotations extensible.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum SessionIntensityDto {
     Peak,
@@ -342,6 +409,9 @@ pub enum StudySessionSourceDto {
     Manual,
 }
 
+// Time-investment DTOs are intentionally plain records with string ids and
+// JSON extras.  Their conversion layer supplies the domain UUID validation and
+// prevents a malformed target from reaching aggregate calculations.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct InvestmentTargetDto {
     pub kind: String,
@@ -368,6 +438,9 @@ pub struct DifficultyAnnotationDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct StudySessionDto {
+    // Session DTOs retain optional annotations and investment targets because
+    // analytics depends on their provenance.  The facade only projects them;
+    // it does not infer missing heart-rate or difficulty information.
     pub id: String,
     pub start_date: String,
     pub duration_seconds: i64,
@@ -381,6 +454,9 @@ pub struct StudySessionDto {
     pub extra_json: String,
 }
 
+// Theme and hierarchy enums/records are FFI-safe projections of the investment
+// graph.  Parent ids remain optional to represent root subtasks without a
+// sentinel UUID.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum TimeInvestmentThemeDto {
     Ocean,
@@ -427,6 +503,8 @@ pub struct GoalRewardDto {
     pub extra_json: String,
 }
 
+// Aggregate DTOs are read-only analysis snapshots.  They are generated by pure
+// Workspace analytics and do not become additional persisted records.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct TimeInvestmentSummaryDto {
     pub target_id: String,
@@ -448,6 +526,8 @@ pub struct TodaySnapshotDto {
     pub suggestions: Vec<String>,
 }
 
+// SRS/trend results keep dates and counters in transport-friendly scalar types;
+// the algorithm and threshold semantics remain in studypulse-workspace.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct SrsReviewResultDto {
     pub state: ReviewStateDto,
@@ -502,6 +582,8 @@ pub struct TrendsSnapshotDto {
     pub srs: SrsOverviewDto,
 }
 
+// Timer status is a process-local state machine.  Its DTO is a snapshot, not a
+// command to persist elapsed time; only finish_timer creates a StudySession.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum TimerStatusKindDto {
     Idle,
@@ -520,8 +602,14 @@ pub struct TimerSnapshotDto {
     pub investment_target: Option<InvestmentTargetDto>,
 }
 
+// Backup options/results cross the FFI boundary as metadata and paths.  The
+// Workspace backup module remains responsible for archive validation, checksums,
+// recovery points, and conflict semantics.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct BackupExportOptionsDto {
+    // Export options are user intent, not an archive manifest.  Workspace
+    // validates the requested path and emits the authoritative schema/checksum
+    // metadata after the export actually succeeds.
     pub archive_path: String,
     pub includes_media: bool,
     pub includes_derived_health_data: bool,
@@ -538,6 +626,9 @@ pub struct BackupExportResultDto {
     pub warnings: Vec<String>,
 }
 
+// `ActiveTimer` is deliberately not a DTO.  `Instant` is monotonic process
+// state and cannot be serialized as a meaningful user timestamp; the facade
+// converts it to elapsed seconds only when a snapshot is requested.
 struct ActiveTimer {
     session_id: uuid::Uuid,
     started_at: String,
@@ -556,6 +647,9 @@ pub struct FileEntryDto {
     pub modified_at: Option<String>,
 }
 
+// Notebook DTOs are persisted by Workspace but are still exposed as a complete
+// FFI graph so Swift can edit source selection and conversation history locally.
+// Workspace identity is checked again when notebooks are saved.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum AgentMessageRoleDto {
     User,
@@ -564,6 +658,9 @@ pub enum AgentMessageRoleDto {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct AgentMessageDto {
+    // A message DTO is inert history.  It cannot cause model completion or tool
+    // execution merely by being deserialized; those actions require explicit
+    // Agent commands and the runtime's permission flow.
     pub id: String,
     pub role: AgentMessageRoleDto,
     pub content: String,
@@ -581,6 +678,9 @@ pub struct AgentNotebookDto {
     pub updated_at: String,
 }
 
+// AgentModeDto and CapabilityManifestDto mirror the runtime's mode/stage
+// protocol.  They are presentation metadata; execution and loop limits remain
+// enforced by AgentRuntime rather than by a Swift caller.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum AgentModeDto {
     Chat,
@@ -603,6 +703,9 @@ pub struct CapabilityManifestDto {
     pub max_loops: u32,
 }
 
+// Search results expose only bounded relative paths/snippets.  PermissionDto is
+// a host-side risk label, not a capability token that a foreign caller can use
+// to bypass prepare or confirmation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct SearchMatchDto {
     pub relative_path: String,
@@ -647,6 +750,9 @@ pub enum AgentEventKindDto {
     Completed,
 }
 
+// Sequence is an exclusive event cursor, not an array index.  Optional fields
+// are populated according to kind: text events use text, tool events use
+// preview/payload, and terminal events use status/error text.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct AgentEventDto {
     pub run_id: String,
@@ -672,6 +778,9 @@ pub enum ConfirmationDecisionDto {
     Deny,
 }
 
+// Backup mode and conflict records are kept explicit across FFI so the host can
+// render an inspection before applying it.  `ImportReportDto` carries the
+// recovery path returned by Workspace after a restore attempt.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, uniffi::Enum)]
 pub enum RestoreModeDto {
     Replace,
@@ -711,6 +820,9 @@ pub struct ImportReportDto {
     pub warnings: Vec<String>,
 }
 
+// Operation events use the same exclusive sequence convention as Agent events,
+// but their state is a separate in-process map because backup sessions are not
+// Workspace records.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
 pub struct OperationEventDto {
     pub operation_id: String,
@@ -720,6 +832,15 @@ pub struct OperationEventDto {
     pub message: String,
 }
 
+// Operation events are transport snapshots, not commands.  Their sequence is
+// assigned by the process-local operation state machine, and their payload is
+// intentionally small enough for polling clients to render without decoding
+// Workspace internals.
+
+// StudyPulseCore owns the process boundary visible to Swift.  Workspace and
+// provider selection are mutually coordinated here, while Agent/timer/backup
+// controls remain in memory and are reset when their owning Workspace or model
+// changes.
 #[derive(uniffi::Object)]
 pub struct StudyPulseCore {
     workspace: Mutex<Option<Workspace>>,
@@ -737,10 +858,17 @@ pub struct StudyPulseCore {
     restore_active: AtomicBool,
 }
 
+// `StudyPulseCore` is a long-lived facade object, but its child state is scoped
+// to the current Workspace and provider.  Reinstalling either clears runtime
+// identities so a later command cannot accidentally address an old root.
+
 #[uniffi::export]
 impl StudyPulseCore {
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
+        // Start disconnected and without a Workspace.  This makes provider and
+        // filesystem readiness explicit instead of manufacturing hidden global
+        // state during object construction.
         Arc::new(Self {
             workspace: Mutex::new(None),
             runtime: Mutex::new(None),
@@ -758,7 +886,15 @@ impl StudyPulseCore {
         })
     }
 
+    // Public methods below follow a common lifecycle: validate input at the
+    // facade edge, obtain a cloned domain handle, call the typed core method,
+    // then project the result into a UniFFI record.  This keeps sync FFI calls
+    // predictable while the domain layer retains its own validation rules.
+
     pub fn create_workspace(&self, path: String) -> Result<WorkspaceDto, CoreError> {
+        // Opening/creating a Workspace is blocked while Agent or restore state
+        // could still be using the previous store.  Installing the new handle
+        // also rebuilds the runtime against the current model, if any.
         self.ensure_no_active_run()?;
         let workspace = Workspace::create(path).map_err(CoreError::message)?;
         let dto = workspace.info().into();
@@ -767,6 +903,8 @@ impl StudyPulseCore {
     }
 
     pub fn open_workspace(&self, path: String) -> Result<WorkspaceDto, CoreError> {
+        // `open` validates existing metadata without recreating the directory;
+        // the facade only publishes its info after the Workspace accepts it.
         self.ensure_no_active_run()?;
         let workspace = Workspace::open(path).map_err(CoreError::message)?;
         let dto = workspace.info().into();
@@ -775,6 +913,8 @@ impl StudyPulseCore {
     }
 
     pub fn close_workspace(&self) -> Result<(), CoreError> {
+        // Closing is a lifecycle transition, so it rejects active restore/Agent
+        // work and clears runtime, last-run, and staged-inspection state together.
         if self.restore_active.load(Ordering::Acquire) {
             return Err(CoreError::message(
                 "cannot close Workspace while a backup restore is active",
@@ -801,6 +941,8 @@ impl StudyPulseCore {
     }
 
     pub fn current_workspace(&self) -> Option<WorkspaceDto> {
+        // This is a metadata snapshot; callers cannot obtain a raw Workspace
+        // reference or infer credentials from an absent/present value.
         self.workspace
             .lock()
             .as_ref()
@@ -808,6 +950,8 @@ impl StudyPulseCore {
     }
 
     pub fn cloud_ai_login_url(&self) -> Result<String, CoreError> {
+        // The callback is fixed to the registered deep-link route so login URLs
+        // cannot redirect tokens to an arbitrary scheme or host.
         CloudModelClient::login_url("studypulse://auth/callback").map_err(CoreError::message)
     }
 
@@ -815,6 +959,8 @@ impl StudyPulseCore {
         &self,
         callback_url: String,
     ) -> Result<CloudAuthTokensDto, CoreError> {
+        // Parsing validates scheme, host, path, error parameters, and token
+        // prefixes in the model client before tokens become a DTO.
         CloudModelClient::parse_auth_callback(&callback_url)
             .map(Into::into)
             .map_err(CoreError::message)
@@ -825,6 +971,9 @@ impl StudyPulseCore {
         access_token: String,
         refresh_token: String,
     ) -> Result<CloudAccountDto, CoreError> {
+        // Cloud connection verifies the refresh-token shape, fetches a profile,
+        // selects the first available model, and replaces any BYOK client.  The
+        // API token remains inside CloudModelClient/secure host storage.
         self.ensure_no_active_run()?;
         if !refresh_token.starts_with("sp_refresh_") {
             return Err(CoreError::message("Cloud AI refresh token is invalid"));
@@ -853,6 +1002,9 @@ impl StudyPulseCore {
         base_url: String,
         model: String,
     ) -> Result<ByokConfigDto, CoreError> {
+        // BYOK follows the same runtime rebuild but publishes only base URL and
+        // model.  The API key is consumed by the provider client and never enters
+        // the returned configuration DTO.
         self.ensure_no_active_run()?;
         let client = OpenAICompatibleModelClient::new(&base_url, api_key, model)
             .map_err(CoreError::message)?;
@@ -868,6 +1020,8 @@ impl StudyPulseCore {
     }
 
     pub fn refresh_cloud_ai(&self, refresh_token: String) -> Result<CloudAuthTokensDto, CoreError> {
+        // Refresh is a provider operation, not a Workspace mutation.  The model
+        // client accepts compatible response envelopes and validates prefixes.
         self.ensure_no_active_run()?;
         let api_base_url = self.cloud_api_base_url.lock().clone();
         run_async(CloudModelClient::refresh_session(
@@ -879,6 +1033,8 @@ impl StudyPulseCore {
     }
 
     pub fn disconnect_cloud_ai(&self) -> Result<(), CoreError> {
+        // Disconnect clears model/runtime state before performing best-effort
+        // provider logout, preventing a stale runtime from using old credentials.
         self.ensure_no_active_run()?;
         let client = self.cloud_client.lock().take();
         *self.cloud_account.lock() = None;
@@ -894,6 +1050,8 @@ impl StudyPulseCore {
     }
 
     pub fn disconnect_byok(&self) -> Result<(), CoreError> {
+        // BYOK disconnect removes the in-memory key-bearing client and its public
+        // status view; no key is persisted in this facade state.
         self.ensure_no_active_run()?;
         let client = self.byok_client.lock().take();
         *self.byok_config.lock() = None;
@@ -906,6 +1064,7 @@ impl StudyPulseCore {
     }
 
     pub fn cloud_ai_account(&self) -> Option<CloudAccountDto> {
+        // Account status is a deliberately redacted view of the Cloud profile.
         self.cloud_account.lock().clone()
     }
 
@@ -915,6 +1074,9 @@ impl StudyPulseCore {
         source_paths: Vec<String>,
         history: Vec<AgentMessageDto>,
     ) -> Result<String, CoreError> {
+        // Convert only the history DTOs needed by AgentRuntime, then remember
+        // the run id for status/cancellation commands.  Runtime owns validation
+        // of the goal, selected sources, and single-active-run rule.
         if self.restore_active.load(Ordering::Acquire) {
             return Err(CoreError::message(
                 "cannot start Agent while a backup restore is active",
@@ -945,6 +1107,8 @@ impl StudyPulseCore {
         source_paths: Vec<String>,
         history: Vec<AgentMessageDto>,
     ) -> Result<String, CoreError> {
+        // Mode conversion is kept at the FFI edge; all event sequencing and
+        // confirmation behavior remains shared with the default Agent entry.
         if self.restore_active.load(Ordering::Acquire) {
             return Err(CoreError::message(
                 "cannot start Agent while a backup restore is active",
@@ -969,10 +1133,14 @@ impl StudyPulseCore {
     }
 
     pub fn list_agent_capabilities(&self) -> Vec<CapabilityManifestDto> {
+        // Return the runtime manifest as DTOs rather than duplicating stage
+        // labels in Swift, keeping loop budgets and labels in one source.
         capability_manifests().into_iter().map(Into::into).collect()
     }
 
     pub fn cancel_agent(&self, run_id: String) -> Result<(), CoreError> {
+        // Cancellation is delegated so the runtime can wake model, confirmation,
+        // input, and event waiters as one atomic lifecycle action.
         self.runtime()?
             .cancel_agent(&run_id)
             .map_err(CoreError::message)
@@ -984,6 +1152,8 @@ impl StudyPulseCore {
         confirmation_id: String,
         decision: ConfirmationDecisionDto,
     ) -> Result<(), CoreError> {
+        // The FFI converts the enum but does not make authorization decisions;
+        // AgentRuntime matches the one-shot confirmation id and pending state.
         self.runtime()?
             .submit_confirmation(
                 &run_id,
@@ -1002,12 +1172,16 @@ impl StudyPulseCore {
         input_id: String,
         answer_json: String,
     ) -> Result<(), CoreError> {
+        // AgentRuntime enforces the bounded answer size and one-shot input id;
+        // the facade only transports the JSON string without interpreting it.
         self.runtime()?
             .submit_input(&run_id, &input_id, answer_json)
             .map_err(CoreError::message)
     }
 
     pub fn get_run_state(&self, run_id: String) -> Result<RunStatusDto, CoreError> {
+        // Status is read from the runtime state machine, not reconstructed from
+        // the last event, so transitional Waiting/Cancelling states remain visible.
         self.runtime()?
             .run_status(&run_id)
             .map(Into::into)
@@ -1020,6 +1194,9 @@ impl StudyPulseCore {
         after_sequence: u64,
         timeout_ms: u32,
     ) -> Result<Vec<AgentEventDto>, CoreError> {
+        // `after_sequence` is exclusive and survives batching or reconnects.
+        // The timeout is bounded by AgentRuntime, while conversion preserves
+        // every event's original sequence and optional payloads.
         self.runtime()?
             .wait_for_events(&run_id, after_sequence, timeout_ms)
             .map(|events| events.into_iter().map(Into::into).collect())
@@ -1027,6 +1204,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_tasks(&self) -> Result<Vec<TaskDto>, CoreError> {
+        // CRUD methods are intentionally thin adapters: Workspace owns JSONL
+        // envelopes, atomic writes, validation, and UUID identity checks.
         self.workspace()?
             .read_tasks()
             .map(|tasks| tasks.into_iter().map(Into::into).collect())
@@ -1052,6 +1231,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_subjects(&self) -> Result<Vec<SubjectDto>, CoreError> {
+        // Subjects and phases follow the same read/try-convert/write pattern;
+        // keeping the pattern in the facade avoids a second persistence layer.
         self.workspace()?
             .read_subjects()
             .map(|values| values.into_iter().map(Into::into).collect())
@@ -1090,6 +1271,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_grades(&self) -> Result<Vec<GradeDto>, CoreError> {
+        // Grade conversion keeps score/ranking optionals and phase linkage intact
+        // while delegating validation and storage format to Workspace.
         self.workspace()?
             .read_grades()
             .map(|values| values.into_iter().map(Into::into).collect())
@@ -1109,6 +1292,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_mistakes(&self) -> Result<Vec<MistakeNoteDto>, CoreError> {
+        // Mistakes include nested review/history DTOs, so From/TryFrom below is
+        // the compatibility boundary rather than ad-hoc JSON in the UI.
         self.workspace()?
             .read_mistakes()
             .map(|values| values.into_iter().map(Into::into).collect())
@@ -1135,6 +1320,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_due_mistakes(&self) -> Result<Vec<MistakeNoteDto>, CoreError> {
+        // Due selection is computed by the shared analytics function using the
+        // current UTC time; the facade does not duplicate SRS date comparisons.
         let values = self
             .workspace()?
             .read_mistakes()
@@ -1164,6 +1351,9 @@ impl StudyPulseCore {
         id: String,
         quality: i64,
     ) -> Result<SrsReviewResultDto, CoreError> {
+        // The accepted quality values mirror iOS and analytics: Again=1,
+        // Hard=3, Good=4, Easy=5.  The domain function updates interval/ease,
+        // while this facade persists the updated mistake atomically.
         if !matches!(quality, 1 | 3 | 4 | 5) {
             return Err(CoreError::message(
                 "review quality must be one of 1, 3, 4, or 5",
@@ -1208,6 +1398,8 @@ impl StudyPulseCore {
     }
 
     pub fn enroll_mistake(&self, id: String) -> Result<ReviewStateDto, CoreError> {
+        // Enrollment is separate from rating so an unqueued mistake can become
+        // due immediately without inventing a review history entry.
         let workspace = self.workspace()?;
         let mistake_id = parse_uuid(&id)?;
         let mut mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
@@ -1241,6 +1433,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_exams(&self) -> Result<Vec<ExamDto>, CoreError> {
+        // Exam and comprehensive-exam DTOs retain nested checklist/review data;
+        // storage and future-field compatibility remain Workspace concerns.
         self.workspace()?
             .read_exams()
             .map(|values| values.into_iter().map(Into::into).collect())
@@ -1279,6 +1473,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_coach_data_json(&self) -> Result<String, CoreError> {
+        // Coach records remain typed inside Workspace but cross this older FFI
+        // surface as structured JSON.  Parsing on every write preserves domain
+        // validation without exposing all coach structs as UniFFI records.
         let data = self
             .workspace()?
             .read_coach_data()
@@ -1343,6 +1540,9 @@ impl StudyPulseCore {
         decision: String,
         expected_goal_version: i64,
     ) -> Result<Vec<String>, CoreError> {
+        // Proposal resolution is an optimistic-concurrency boundary: goal and
+        // proposal versions must match, expiry is persisted, and approval turns
+        // validated proposal items into tasks only after all checks pass.
         let workspace = self.workspace()?;
         let mut data = workspace.read_coach_data().map_err(CoreError::message)?;
         let proposal_id = parse_uuid(&proposal_id)?;
@@ -1409,6 +1609,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_exam_goals_json(&self) -> Result<Vec<String>, CoreError> {
+        // Coach/exam planning JSON keeps the FFI stable while the domain structs
+        // evolve.  Every string still round-trips through serde and Workspace
+        // validation before it can be persisted.
         self.workspace()?
             .read_exam_goals()
             .map_err(CoreError::message)?
@@ -1453,6 +1656,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_exam_simulations_json(&self) -> Result<Vec<String>, CoreError> {
+        // Simulation helpers use the same typed-inside/JSON-at-edge pattern as
+        // goals and plans; default_simulation supplies a deterministic initial
+        // value without creating a record until the caller saves it.
         self.workspace()?
             .read_exam_simulations()
             .map_err(CoreError::message)?
@@ -1480,6 +1686,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_learning_report_json(&self, range_days: i64) -> Result<String, CoreError> {
+        // Reports are derived snapshots.  Range clamping and aggregation remain
+        // in Workspace so all clients receive identical analytics semantics.
         let report = self
             .workspace()?
             .learning_report(range_days)
@@ -1488,6 +1696,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_routines(&self) -> Result<Vec<RoutineDto>, CoreError> {
+        // Routine records and generated instances are separate collections; the
+        // facade keeps their CRUD calls distinct so completion cannot mutate the
+        // routine definition accidentally.
         self.workspace()?
             .read_routines()
             .map(|values| values.into_iter().map(Into::into).collect())
@@ -1605,6 +1816,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_time_investment_summary(&self) -> Result<Vec<TimeInvestmentSummaryDto>, CoreError> {
+        // Investment summaries are computed from subjects, subtasks, and
+        // sessions together.  Returning an aggregate DTO avoids duplicating
+        // direct/total-second rules in each client.
         let workspace = self.workspace()?;
         let summaries = studypulse_workspace::investment_summary(
             &workspace
@@ -1619,6 +1833,9 @@ impl StudyPulseCore {
     }
 
     pub fn get_learning_trends(&self, range_days: i64) -> Result<TrendsSnapshotDto, CoreError> {
+        // Clamp/aggregation semantics are owned by learning_trends; this method
+        // only gathers the required Workspace collections and projects the
+        // result into Swift-safe records.
         let workspace = self.workspace()?;
         let snapshot = studypulse_workspace::learning_trends(
             chrono::Utc::now(),
@@ -1635,6 +1852,8 @@ impl StudyPulseCore {
     }
 
     pub fn get_today_snapshot(&self) -> Result<TodaySnapshotDto, CoreError> {
+        // Today snapshot is another derived view.  It does not write suggestions
+        // or counters back to Workspace, so refreshes remain side-effect free.
         let workspace = self.workspace()?;
         let snapshot = studypulse_workspace::today_snapshot(
             chrono::Utc::now(),
@@ -1656,6 +1875,9 @@ impl StudyPulseCore {
         target_duration_seconds: i64,
         investment_target: Option<InvestmentTargetDto>,
     ) -> Result<TimerSnapshotDto, CoreError> {
+        // Starting a timer reserves process-local state and does not persist a
+        // session.  A running Agent is rejected to keep the shared runtime from
+        // mixing background work with timer ownership.
         self.ensure_no_active_run()?;
         if target_duration_seconds < 0 {
             return Err(CoreError::message("timer duration cannot be negative"));
@@ -1680,6 +1902,8 @@ impl StudyPulseCore {
     }
 
     pub fn pause_timer(&self) -> Result<TimerSnapshotDto, CoreError> {
+        // Pause transfers elapsed time from monotonic Instant into the integer
+        // accumulator; the timer remains in memory and can be resumed.
         let mut timer = self.active_timer.lock();
         let value = timer
             .as_mut()
@@ -1691,6 +1915,8 @@ impl StudyPulseCore {
     }
 
     pub fn resume_timer(&self) -> Result<TimerSnapshotDto, CoreError> {
+        // Resume starts a fresh monotonic segment only when currently paused,
+        // preventing repeated resume calls from double-counting elapsed time.
         let mut timer = self.active_timer.lock();
         let value = timer
             .as_mut()
@@ -1702,6 +1928,9 @@ impl StudyPulseCore {
     }
 
     pub fn finish_timer(&self) -> Result<StudySessionDto, CoreError> {
+        // Finish consumes the in-process timer exactly once, converts elapsed
+        // time to a StudySession, and then performs the sole timer persistence
+        // write.  The returned DTO is the stored session projection.
         let mut timer = self.active_timer.lock();
         let value = timer
             .take()
@@ -1727,6 +1956,8 @@ impl StudyPulseCore {
     }
 
     pub fn cancel_timer(&self) -> Result<(), CoreError> {
+        // Cancel discards only the in-memory timer; unlike finish it must not
+        // create a partial StudySession record.
         let mut timer = self.active_timer.lock();
         if timer.take().is_none() {
             return Err(CoreError::message("no active timer"));
@@ -1735,6 +1966,8 @@ impl StudyPulseCore {
     }
 
     pub fn active_timer(&self) -> TimerSnapshotDto {
+        // Missing state is represented as an explicit Idle snapshot so Swift can
+        // render the timer without an optional state machine of its own.
         self.active_timer
             .lock()
             .as_ref()
@@ -1751,6 +1984,8 @@ impl StudyPulseCore {
     }
 
     pub fn read_media(&self, relative_path: String) -> Result<Vec<u8>, CoreError> {
+        // Workspace performs media path and size checks.  Raw bytes are returned
+        // here because the Tauri host decides how to encode them for the UI.
         self.workspace()?
             .read_media(&relative_path)
             .map_err(CoreError::message)
@@ -1761,6 +1996,8 @@ impl StudyPulseCore {
         relative_path: String,
         contents: Vec<u8>,
     ) -> Result<String, CoreError> {
+        // Media writes remain behind Workspace path/size validation; the FFI
+        // does not construct filesystem paths from the wire string itself.
         self.workspace()?
             .write_media(&relative_path, &contents)
             .map_err(CoreError::message)
@@ -1770,6 +2007,8 @@ impl StudyPulseCore {
         &self,
         options: BackupExportOptionsDto,
     ) -> Result<BackupExportResultDto, CoreError> {
+        // Export delegates archive format, checksums, and media policy to the
+        // backup module, then exposes only manifest metadata to the client.
         let result = self
             .workspace()?
             .export_backup(
@@ -1822,6 +2061,8 @@ impl StudyPulseCore {
         workspace_id: String,
         notebooks: Vec<AgentNotebookDto>,
     ) -> Result<(), CoreError> {
+        // Workspace identity is compared before writing notebook history so a
+        // delayed UI save cannot overwrite data after the user switched stores.
         let workspace = self.workspace()?;
         if workspace.info().id != workspace_id {
             return Err(CoreError::message(
@@ -1845,6 +2086,9 @@ impl StudyPulseCore {
     }
 
     pub fn inspect_backup(&self, archive_path: String) -> Result<BackupInspectionDto, CoreError> {
+        // Inspection stages and caches the validated backup without applying it.
+        // The inspection id is then used to correlate operation events and the
+        // later apply/cancel command.
         let workspace = self.workspace()?;
         let inspection = workspace
             .inspect_backup(archive_path)
@@ -1872,6 +2116,9 @@ impl StudyPulseCore {
         mode: RestoreModeDto,
         resolutions: Vec<BackupResolutionDto>,
     ) -> Result<ImportReportDto, CoreError> {
+        // Restore is an exclusive process-local state transition.  The guard is
+        // released even on error, while the staged inspection is removed only
+        // after Workspace applies it successfully.
         self.ensure_no_active_run()?;
         self.restore_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1916,6 +2163,8 @@ impl StudyPulseCore {
     }
 
     pub fn cancel_backup(&self, inspection_id: String) -> Result<(), CoreError> {
+        // Cancel removes the staged inspection and lets Workspace clean its
+        // temporary import area without touching current records.
         let inspection = self
             .inspections
             .lock()
@@ -1932,6 +2181,9 @@ impl StudyPulseCore {
         after_sequence: u64,
         _timeout_ms: u32,
     ) -> Vec<OperationEventDto> {
+        // Backup event cursors use the same exclusive `sequence > cursor` rule
+        // as Agent events, even though the current operation list is short and
+        // in-memory.
         self.operation_events
             .lock()
             .get(&operation_id)
@@ -1944,7 +2196,14 @@ impl StudyPulseCore {
 }
 
 impl StudyPulseCore {
+    // Private helpers below are lifecycle guards and projections, not a second
+    // service layer.  They centralize invariants that every exported command
+    // needs: one Workspace handle, one current model, no active restore, and no
+    // stale Agent run id after a provider or Workspace switch.
     fn ensure_no_active_run(&self) -> Result<(), CoreError> {
+        // Workspace replacement, provider changes, and restore must not race an
+        // Agent.  This guard checks both backup and the runtime's terminal state
+        // before any lifecycle-changing command proceeds.
         if self.restore_active.load(Ordering::Acquire) {
             return Err(CoreError::message("a backup restore is currently active"));
         }
@@ -1963,6 +2222,9 @@ impl StudyPulseCore {
     }
 
     fn install_workspace(&self, workspace: Workspace) {
+        // Installing a Workspace resets run/inspection identity and rebuilds the
+        // Agent against the currently selected model.  It never migrates a
+        // process-local timer or backup session across Workspace roots.
         *self.workspace.lock() = Some(workspace);
         let model = self.model.lock().clone();
         *self.runtime.lock() = model.map(|model| {
@@ -1980,12 +2242,16 @@ impl StudyPulseCore {
     }
 
     fn rebuild_runtime(&self, model: Arc<dyn ModelClient>) {
+        // Provider switching replaces the runtime so no future Agent call can
+        // retain the old client's credentials or protocol implementation.
         let workspace = self.workspace.lock().clone();
         *self.runtime.lock() = workspace.map(|workspace| AgentRuntime::new(workspace, model));
         *self.last_run_id.lock() = None;
     }
 
     fn workspace(&self) -> Result<Workspace, CoreError> {
+        // Return a clone of the cheap Workspace handle, not a mutable reference;
+        // Workspace itself owns its write lock and atomic persistence rules.
         self.workspace
             .lock()
             .as_ref()
@@ -1994,6 +2260,8 @@ impl StudyPulseCore {
     }
 
     fn runtime(&self) -> Result<Arc<AgentRuntime>, CoreError> {
+        // Distinguish “no Workspace” from “Workspace without AI provider” for
+        // callers, while keeping the runtime object private to the facade.
         self.runtime.lock().as_ref().cloned().ok_or_else(|| {
             if self.workspace.lock().is_some() {
                 CoreError::message("Cloud AI is not connected")
@@ -2007,6 +2275,12 @@ impl StudyPulseCore {
 fn run_async<T>(
     future: impl std::future::Future<Output = Result<T, studypulse_model_client::ModelError>>,
 ) -> Result<T, studypulse_model_client::ModelError> {
+    // Keeping this executor local avoids requiring callers to understand Tokio
+    // when invoking synchronous UniFFI methods.  Long-lived Agent execution is
+    // still owned by AgentRuntime; this helper is reserved for bounded calls.
+    // UniFFI methods are synchronous, so provider futures run on a short-lived
+    // current-thread executor.  AgentRuntime uses its own executor for runs;
+    // this helper is limited to one-shot auth/profile/logout calls.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2017,12 +2291,16 @@ fn run_async<T>(
 struct RestoreFlagGuard<'a>(&'a AtomicBool);
 
 impl Drop for RestoreFlagGuard<'_> {
+    // RAII guarantees a failed validation, conversion, or Workspace operation
+    // cannot leave the facade permanently reporting an active restore.
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
 }
 
 impl From<WorkspaceInfo> for WorkspaceDto {
+    // WorkspaceInfo already contains validated metadata; this projection keeps
+    // paths and schema version in the FFI naming convention.
     fn from(value: WorkspaceInfo) -> Self {
         Self {
             id: value.id,
@@ -2033,20 +2311,28 @@ impl From<WorkspaceInfo> for WorkspaceDto {
 }
 
 fn parse_uuid(value: &str) -> Result<uuid::Uuid, CoreError> {
+    // UUID parsing happens at every id-taking facade method so domain methods
+    // receive typed identities and error messages stay uniform.
     value
         .parse()
         .map_err(|error| CoreError::message(format!("invalid UUID {value}: {error}")))
 }
 
 fn parse_optional_uuid(value: Option<String>) -> Result<Option<uuid::Uuid>, CoreError> {
+    // Optional links preserve “not associated” as None while still rejecting a
+    // present malformed UUID instead of silently dropping it.
     value.as_deref().map(parse_uuid).transpose()
 }
 
 fn encode_extra(value: &BTreeMap<String, serde_json::Value>) -> String {
+    // Unknown domain fields cross UniFFI as one JSON string, preserving forward
+    // compatibility without asking Swift to model every future key.
     serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
 }
 
 fn decode_extra(value: &str) -> Result<BTreeMap<String, serde_json::Value>, CoreError> {
+    // Decode extras as an object only.  A scalar or array would not round-trip
+    // to the domain flatten map and is rejected before a write.
     if value.trim().is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -2059,9 +2345,24 @@ fn decode_extra(value: &str) -> Result<BTreeMap<String, serde_json::Value>, Core
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, CoreError> {
+    // Structured JSON edges share one error conversion so invalid DTO payloads
+    // cannot bypass the facade's single CoreError boundary.
     serde_json::from_str(value).map_err(|error| CoreError::message(error.to_string()))
 }
 
+// Conversion implementations are deliberately kept in this facade instead of
+// scattered across domain crates.  The domain models can evolve internally,
+// while this file documents exactly what Swift receives and what validation
+// occurs before a DTO is accepted for persistence.
+
+// Task conversion is asymmetric by design: From exposes the domain record,
+// while TryFrom parses UUIDs/extras and calls domain validation before writes.
+// The conversion section follows one invariant throughout: From is a read
+// projection, TryFrom is a write gate.  UUIDs are parsed, `extra_json` is
+// decoded as an object, optional relationships stay optional, and domain
+// validation is invoked before a Workspace mutation.  This is intentionally
+// repetitive at the family boundaries because each DTO is independently
+// generated for Swift and may be maintained without reading neighboring types.
 impl From<TaskItem> for TaskDto {
     fn from(value: TaskItem) -> Self {
         Self {
@@ -2089,6 +2390,12 @@ impl From<TaskItem> for TaskDto {
     }
 }
 
+// The subject/phase/grade family follows the same lossless projection rule:
+// ids are strings at the wire edge, optional links stay optional, and `extra`
+// is carried as JSON so older clients do not destroy newer fields on write.
+
+// TryFrom is the write-side boundary: parse UUIDs/extras first, then let the
+// domain validator reject empty titles, bad dates, or unsupported priorities.
 impl TryFrom<TaskDto> for TaskItem {
     type Error = CoreError;
 
@@ -2118,6 +2425,8 @@ impl TryFrom<TaskDto> for TaskItem {
     }
 }
 
+// Subject conversion keeps display metadata and extension fields intact; the
+// reverse path rejects malformed ids instead of creating a new subject.
 impl From<Subject> for SubjectDto {
     fn from(value: Subject) -> Self {
         Self {
@@ -2131,6 +2440,8 @@ impl From<Subject> for SubjectDto {
     }
 }
 
+// Subject writes preserve the caller's id and extension map; malformed values
+// fail before Workspace receives a mutation.
 impl TryFrom<SubjectDto> for Subject {
     type Error = CoreError;
 
@@ -2146,6 +2457,8 @@ impl TryFrom<SubjectDto> for Subject {
     }
 }
 
+// Phase goals are nested inside StudyPhase but still have their own UUID and
+// extra map, so both directions use the same strict helper functions.
 impl From<PhaseGoal> for PhaseGoalDto {
     fn from(value: PhaseGoal) -> Self {
         Self {
@@ -2158,6 +2471,8 @@ impl From<PhaseGoal> for PhaseGoalDto {
     }
 }
 
+// Nested phase goals use the same strict id/extra conversion as top-level
+// records, keeping a malformed child from being silently dropped.
 impl TryFrom<PhaseGoalDto> for PhaseGoal {
     type Error = CoreError;
 
@@ -2172,6 +2487,8 @@ impl TryFrom<PhaseGoalDto> for PhaseGoal {
     }
 }
 
+// StudyPhase conversion maps nested goals recursively and preserves archived
+// timestamps as optional wire values rather than inventing defaults.
 impl From<StudyPhase> for StudyPhaseDto {
     fn from(value: StudyPhase) -> Self {
         Self {
@@ -2188,6 +2505,8 @@ impl From<StudyPhase> for StudyPhaseDto {
     }
 }
 
+// Phase conversion validates every nested goal and optional archive timestamp
+// before the enclosing phase is persisted.
 impl TryFrom<StudyPhaseDto> for StudyPhase {
     type Error = CoreError;
 
@@ -2210,7 +2529,14 @@ impl TryFrom<StudyPhaseDto> for StudyPhase {
     }
 }
 
+// Grade DTOs carry optional image/ranking/phase data.  Conversion does not
+// normalize scores; Workspace remains the source of score validation semantics.
+// Assessment records keep raw/normalized score data separate.  The facade does
+// not “helpfully” recompute rates or rankings during a transport conversion;
+// analytics consumes the stored values later.
 impl From<Grade> for GradeDto {
+    // Grade projection preserves optional ranking, full score, image metadata,
+    // and phase links because reports depend on those distinctions.
     fn from(value: Grade) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2231,7 +2557,11 @@ impl From<Grade> for GradeDto {
     }
 }
 
+// Grade TryFrom parses optional foreign ids and image metadata without changing
+// score values; domain validation remains authoritative.
 impl TryFrom<GradeDto> for Grade {
+    // Grade input validates ids and extension JSON before score-domain checks
+    // run, keeping malformed imported records out of local storage.
     type Error = CoreError;
 
     fn try_from(value: GradeDto) -> Result<Self, Self::Error> {
@@ -2254,7 +2584,11 @@ impl TryFrom<GradeDto> for Grade {
     }
 }
 
+// Diary timestamps and mood/energy values cross as the existing scalar fields;
+// the domain validator remains responsible for acceptable ranges and dates.
 impl From<DiaryEntry> for DiaryEntryDto {
+    // Diary projection is read-only and keeps the stored mood/energy values
+    // intact.  No client-specific interpretation belongs in this adapter.
     fn from(value: DiaryEntry) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2271,7 +2605,11 @@ impl From<DiaryEntry> for DiaryEntryDto {
     }
 }
 
+// Diary writes retain explicit timestamps and extension JSON so old entries can
+// be edited without losing fields introduced by newer clients.
 impl TryFrom<DiaryEntryDto> for DiaryEntry {
+    // Incoming diary values use the same UUID, timestamp, and extension checks
+    // as every persisted record before they reach Workspace.
     type Error = CoreError;
 
     fn try_from(value: DiaryEntryDto) -> Result<Self, Self::Error> {
@@ -2290,6 +2628,8 @@ impl TryFrom<DiaryEntryDto> for DiaryEntry {
     }
 }
 
+// ReviewState is shared by SRS analytics and mistake DTOs.  Keeping its
+// conversion standalone avoids two clients drifting on ease/interval fields.
 impl From<ReviewState> for ReviewStateDto {
     fn from(value: ReviewState) -> Self {
         Self {
@@ -2304,6 +2644,8 @@ impl From<ReviewState> for ReviewStateDto {
     }
 }
 
+// ReviewState conversion keeps SRS numeric values intact; apply_srs decides how
+// they evolve, not the transport layer.
 impl TryFrom<ReviewStateDto> for ReviewState {
     type Error = CoreError;
 
@@ -2320,6 +2662,8 @@ impl TryFrom<ReviewStateDto> for ReviewState {
     }
 }
 
+// Mastery history is append-only evidence for analytics.  The facade projects
+// it without recalculating scores or timestamps.
 impl From<MasteryHistoryEntry> for MasteryHistoryEntryDto {
     fn from(value: MasteryHistoryEntry) -> Self {
         Self {
@@ -2332,6 +2676,8 @@ impl From<MasteryHistoryEntry> for MasteryHistoryEntryDto {
     }
 }
 
+// Mastery history input is validated as an entry but never re-derived from a
+// current score, preserving historical evidence.
 impl TryFrom<MasteryHistoryEntryDto> for MasteryHistoryEntry {
     type Error = CoreError;
 
@@ -2346,6 +2692,8 @@ impl TryFrom<MasteryHistoryEntryDto> for MasteryHistoryEntry {
     }
 }
 
+// Handwriting answers use base64 strings at the FFI boundary; media decoding is
+// intentionally left to the client and is not performed during conversion.
 impl From<HandwritingAnswerEntry> for HandwritingAnswerEntryDto {
     fn from(value: HandwritingAnswerEntry) -> Self {
         Self {
@@ -2358,6 +2706,8 @@ impl From<HandwritingAnswerEntry> for HandwritingAnswerEntryDto {
     }
 }
 
+// Handwriting DTO input remains base64 text at this boundary; media limits and
+// decoding rules belong to the Workspace/media path.
 impl TryFrom<HandwritingAnswerEntryDto> for HandwritingAnswerEntry {
     type Error = CoreError;
 
@@ -2372,7 +2722,16 @@ impl TryFrom<HandwritingAnswerEntryDto> for HandwritingAnswerEntry {
     }
 }
 
+// Mistake conversion is the largest learning-record projection: nested review,
+// mastery, handwriting, tags, media names, and extension JSON all round-trip.
+// TryFrom validates every nested UUID/date before persistence.
+// Mistake notes are the main cross-domain graph: SRS state, mastery history,
+// handwriting evidence, media names, and tags all need to survive a round
+// trip.  Keeping the graph explicit also makes it clear where a future field
+// belongs: DTO field, nested DTO, or extra_json.
 impl From<MistakeNoteFull> for MistakeNoteDto {
+    // Mistake history includes SRS state and mastery history; this projection
+    // keeps both the current queue state and the audit trail visible to clients.
     fn from(value: MistakeNoteFull) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2406,6 +2765,8 @@ impl From<MistakeNoteFull> for MistakeNoteDto {
     }
 }
 
+// Mistake TryFrom recursively validates review and history children, then lets
+// MistakeNoteFull::validate enforce the record-level invariants.
 impl TryFrom<MistakeNoteDto> for MistakeNoteFull {
     type Error = CoreError;
 
@@ -2446,6 +2807,8 @@ impl TryFrom<MistakeNoteDto> for MistakeNoteFull {
     }
 }
 
+// Exam time slots are small nested records, but their date strings remain
+// domain-owned so the FFI never silently changes timezone or precision.
 impl From<ExamTimeSlot> for ExamTimeSlotDto {
     fn from(value: ExamTimeSlot) -> Self {
         Self {
@@ -2456,6 +2819,8 @@ impl From<ExamTimeSlot> for ExamTimeSlotDto {
     }
 }
 
+// Exam slot input is parsed as a nested value so invalid times fail the whole
+// exam conversion instead of becoming an incomplete schedule.
 impl TryFrom<ExamTimeSlotDto> for ExamTimeSlot {
     type Error = CoreError;
 
@@ -2468,6 +2833,8 @@ impl TryFrom<ExamTimeSlotDto> for ExamTimeSlot {
     }
 }
 
+// Checklist conversion preserves stable ids and sort order; UI check state is
+// not inferred from title or position.
 impl From<ExamChecklistItem> for ExamChecklistItemDto {
     fn from(value: ExamChecklistItem) -> Self {
         Self {
@@ -2480,6 +2847,8 @@ impl From<ExamChecklistItem> for ExamChecklistItemDto {
     }
 }
 
+// Checklist TryFrom preserves explicit sort order and checked state; no UI
+// index is substituted for the stored value.
 impl TryFrom<ExamChecklistItemDto> for ExamChecklistItem {
     type Error = CoreError;
 
@@ -2494,6 +2863,8 @@ impl TryFrom<ExamChecklistItemDto> for ExamChecklistItem {
     }
 }
 
+// Exam review notes and linked mistake ids remain a typed nested DTO graph so
+// review history can be edited without reparsing the whole exam JSON.
 impl From<ExamReview> for ExamReviewDto {
     fn from(value: ExamReview) -> Self {
         Self {
@@ -2513,6 +2884,8 @@ impl From<ExamReview> for ExamReviewDto {
     }
 }
 
+// Exam review input validates linked mistake ids and keeps the note fields
+// untouched for round-trip editing.
 impl TryFrom<ExamReviewDto> for ExamReview {
     type Error = CoreError;
 
@@ -2534,7 +2907,14 @@ impl TryFrom<ExamReviewDto> for ExamReview {
     }
 }
 
+// Exam conversion composes the slot/checklist/review projections and retains
+// optional locations, notifications, and phase linkage exactly as stored.
+// Exam projection preserves nested review/checklist relationships rather than
+// flattening them into a JSON blob.  This lets Swift edit one child while the
+// Workspace remains the owner of the enclosing record's validation.
 impl From<ExamFull> for ExamDto {
+    // Exam projection preserves nested slots, checklist items, and review
+    // links as separate DTO records so the UI can edit each lifecycle safely.
     fn from(value: ExamFull) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2558,7 +2938,11 @@ impl From<ExamFull> for ExamDto {
     }
 }
 
+// Single-exam conversion composes nested slot/checklist/review results and
+// rejects any invalid child before the parent write.
 impl TryFrom<ExamDto> for ExamFull {
+    // Exam writes reconstruct typed ids and nested records before domain
+    // validation; a malformed child cannot be hidden inside an outer DTO.
     type Error = CoreError;
 
     fn try_from(value: ExamDto) -> Result<Self, Self::Error> {
@@ -2588,7 +2972,11 @@ impl TryFrom<ExamDto> for ExamFull {
     }
 }
 
+// Comprehensive exams differ from single exams only in subject/time-slot shape;
+// keeping a separate conversion prevents accidental loss of multi-subject data.
 impl From<ComprehensiveExamFull> for ComprehensiveExamDto {
+    // Comprehensive exam DTOs are read projections of aggregate analytics, not
+    // a second calculation path for readiness or grading.
     fn from(value: ComprehensiveExamFull) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2608,6 +2996,8 @@ impl From<ComprehensiveExamFull> for ComprehensiveExamDto {
     }
 }
 
+// Comprehensive exam input preserves its subject list and optional time-slot
+// JSON as distinct fields; it is not coerced into a single-subject exam.
 impl TryFrom<ComprehensiveExamDto> for ComprehensiveExamFull {
     type Error = CoreError;
 
@@ -2632,6 +3022,8 @@ impl TryFrom<ComprehensiveExamDto> for ComprehensiveExamFull {
     }
 }
 
+// Routine enums are explicit exhaustive mappings.  Unknown variants cannot be
+// silently represented at this FFI boundary, which makes additions reviewable.
 impl From<RoutineType> for RoutineTypeDto {
     fn from(value: RoutineType) -> Self {
         match value {
@@ -2641,6 +3033,10 @@ impl From<RoutineType> for RoutineTypeDto {
         }
     }
 }
+
+// Routine and routine-instance records are split because a generated instance
+// owns completion state while the routine owns the reusable schedule.  A single
+// DTO would invite callers to overwrite one lifecycle with the other.
 
 impl From<RoutineTypeDto> for RoutineType {
     fn from(value: RoutineTypeDto) -> Self {
@@ -2652,6 +3048,11 @@ impl From<RoutineTypeDto> for RoutineType {
     }
 }
 
+// Routine conversion keeps recurring schedule fields separate from generated
+// instance state; persistence continues to happen in Workspace.
+// Recurrence definitions and generated instances intentionally have separate
+// conversion families.  A routine update therefore cannot accidentally change
+// completion state already materialized for a date.
 impl From<Routine> for RoutineDto {
     fn from(value: Routine) -> Self {
         Self {
@@ -2670,6 +3071,8 @@ impl From<Routine> for RoutineDto {
     }
 }
 
+// Routine write conversion validates recurring schedule data and optional
+// subject/phase links before Workspace stores the definition.
 impl TryFrom<RoutineDto> for Routine {
     type Error = CoreError;
 
@@ -2690,6 +3093,8 @@ impl TryFrom<RoutineDto> for Routine {
     }
 }
 
+// Routine instances carry their date key and completion metadata independently
+// so a generated occurrence can be updated without rewriting its definition.
 impl From<RoutineInstance> for RoutineInstanceDto {
     fn from(value: RoutineInstance) -> Self {
         Self {
@@ -2710,6 +3115,8 @@ impl From<RoutineInstance> for RoutineInstanceDto {
     }
 }
 
+// Generated-instance conversion is separate from Routine conversion so
+// completion timestamps and spawned counts remain instance-local.
 impl TryFrom<RoutineInstanceDto> for RoutineInstance {
     type Error = CoreError;
 
@@ -2732,6 +3139,8 @@ impl TryFrom<RoutineInstanceDto> for RoutineInstance {
     }
 }
 
+// Session intensity and source enums preserve provenance/effort labels without
+// reinterpreting them in the facade.
 impl From<SessionIntensity> for SessionIntensityDto {
     fn from(value: SessionIntensity) -> Self {
         match value {
@@ -2743,6 +3152,10 @@ impl From<SessionIntensity> for SessionIntensityDto {
         }
     }
 }
+
+// Study-session conversions preserve provenance and intensity as enums rather
+// than strings.  Exhaustive matches make a new domain variant fail compilation
+// until the FFI contract and generated clients are updated together.
 
 impl From<SessionIntensityDto> for SessionIntensity {
     fn from(value: SessionIntensityDto) -> Self {
@@ -2756,6 +3169,8 @@ impl From<SessionIntensityDto> for SessionIntensity {
     }
 }
 
+// Timer/manual source is part of the stored session contract; conversion keeps
+// it explicit for analytics and UI filtering.
 impl From<StudySessionSource> for StudySessionSourceDto {
     fn from(value: StudySessionSource) -> Self {
         match value {
@@ -2774,6 +3189,8 @@ impl From<StudySessionSourceDto> for StudySessionSource {
     }
 }
 
+// Investment targets are UUID-linked domain values.  The reverse conversion
+// validates both kind and id before they participate in aggregates.
 impl From<InvestmentTarget> for InvestmentTargetDto {
     fn from(value: InvestmentTarget) -> Self {
         match value {
@@ -2789,6 +3206,12 @@ impl From<InvestmentTarget> for InvestmentTargetDto {
     }
 }
 
+// Time-investment DTOs carry both aggregate summaries and their typed targets.
+// The facade does not calculate totals; it projects the values already derived
+// by Workspace so iOS, desktop, and tests share one analytics implementation.
+
+// Investment target ids are parsed at the boundary and then validated by the
+// domain type; aggregates never receive a raw wire string.
 impl TryFrom<InvestmentTargetDto> for InvestmentTarget {
     type Error = CoreError;
 
@@ -2805,6 +3228,8 @@ impl TryFrom<InvestmentTargetDto> for InvestmentTarget {
     }
 }
 
+// Physiological samples are optional session children.  Their conversion is
+// lossless and does not apply health interpretation in the transport layer.
 impl From<HeartRateSample> for HeartRateSampleDto {
     fn from(value: HeartRateSample) -> Self {
         Self {
@@ -2816,6 +3241,8 @@ impl From<HeartRateSample> for HeartRateSampleDto {
     }
 }
 
+// Heart-rate samples preserve timestamp/bpm values and reject malformed ids or
+// extras before they can be attached to a study session.
 impl TryFrom<HeartRateSampleDto> for HeartRateSample {
     type Error = CoreError;
 
@@ -2829,6 +3256,8 @@ impl TryFrom<HeartRateSampleDto> for HeartRateSample {
     }
 }
 
+// Difficulty annotations retain optional heart-rate context and subject links;
+// analytics can decide how to use them after the round trip.
 impl From<DifficultyAnnotation> for DifficultyAnnotationDto {
     fn from(value: DifficultyAnnotation) -> Self {
         Self {
@@ -2842,6 +3271,8 @@ impl From<DifficultyAnnotation> for DifficultyAnnotationDto {
     }
 }
 
+// Difficulty annotations are optional session evidence; conversion does not
+// classify difficulty or infer a subject from the note.
 impl TryFrom<DifficultyAnnotationDto> for DifficultyAnnotation {
     type Error = CoreError;
 
@@ -2857,7 +3288,14 @@ impl TryFrom<DifficultyAnnotationDto> for DifficultyAnnotation {
     }
 }
 
+// StudySession conversion recursively projects samples, annotations, and target
+// while preserving the optional-vs-empty distinction used by older records.
+// Sessions are the bridge between timer/manual input and analytics.  Recursive
+// conversion keeps optional heart-rate/difficulty evidence and investment
+// target identity visible without running any analysis at this layer.
 impl From<StudySession> for StudySessionDto {
+    // Session projection copies analytics inputs without recalculating elapsed
+    // time or altering source/intensity provenance.
     fn from(value: StudySession) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2879,7 +3317,11 @@ impl From<StudySession> for StudySessionDto {
     }
 }
 
+// StudySession TryFrom recursively converts optional child vectors and target,
+// preserving None versus an explicitly empty history.
 impl TryFrom<StudySessionDto> for StudySession {
+    // Session input is parsed before persistence so optional annotations remain
+    // either valid records or explicit None values, never silent placeholders.
     type Error = CoreError;
 
     fn try_from(value: StudySessionDto) -> Result<Self, Self::Error> {
@@ -2915,6 +3357,8 @@ impl TryFrom<StudySessionDto> for StudySession {
     }
 }
 
+// Themes are display enums at the boundary, but exhaustive conversion keeps
+// stored theme values stable across Swift and Rust.
 impl From<TimeInvestmentTheme> for TimeInvestmentThemeDto {
     fn from(value: TimeInvestmentTheme) -> Self {
         match value {
@@ -2939,7 +3383,13 @@ impl From<TimeInvestmentThemeDto> for TimeInvestmentTheme {
     }
 }
 
+// Investment subjects preserve ordering, archive status, symbol, and theme so
+// the client can render the same hierarchy without domain knowledge.
+// Investment hierarchy conversion preserves parent/order/archive metadata so
+// clients can render and reorder the graph without reconstructing domain ids.
 impl From<TimeInvestmentSubject> for TimeInvestmentSubjectDto {
+    // Subject investment records keep target seconds and theme metadata typed
+    // so aggregate summaries can be displayed without string parsing.
     fn from(value: TimeInvestmentSubject) -> Self {
         Self {
             id: value.id.to_string(),
@@ -2955,7 +3405,11 @@ impl From<TimeInvestmentSubject> for TimeInvestmentSubjectDto {
     }
 }
 
+// Investment subject input keeps archive/order fields explicit and validates the
+// UUID before it enters time-investment aggregation.
 impl TryFrom<TimeInvestmentSubjectDto> for TimeInvestmentSubject {
+    // The reverse projection parses the subject identity and extra object before
+    // the record enters the Workspace investment collection.
     type Error = CoreError;
 
     fn try_from(value: TimeInvestmentSubjectDto) -> Result<Self, Self::Error> {
@@ -2973,6 +3427,8 @@ impl TryFrom<TimeInvestmentSubjectDto> for TimeInvestmentSubject {
     }
 }
 
+// SubTask conversion keeps parent linkage optional for roots and retains sort
+// order as a persisted value rather than using UI array order.
 impl From<SubTask> for SubTaskDto {
     fn from(value: SubTask) -> Self {
         Self {
@@ -2988,6 +3444,8 @@ impl From<SubTask> for SubTaskDto {
     }
 }
 
+// Subtask conversion preserves optional parent linkage so hierarchy cycles and
+// malformed ids remain domain validation concerns.
 impl TryFrom<SubTaskDto> for SubTask {
     type Error = CoreError;
 
@@ -3005,7 +3463,11 @@ impl TryFrom<SubTaskDto> for SubTask {
     }
 }
 
+// Goal rewards expose threshold/unlocked state as a snapshot; unlocking logic
+// remains in Workspace and is not triggered by conversion.
 impl From<GoalReward> for GoalRewardDto {
+    // Reward projection preserves the goal link and earned timestamps as stored
+    // values; the facade never grants or recalculates rewards.
     fn from(value: GoalReward) -> Self {
         Self {
             id: value.id.to_string(),
@@ -3020,7 +3482,11 @@ impl From<GoalReward> for GoalRewardDto {
     }
 }
 
+// Goal reward input validates its target and ids while leaving unlock status to
+// the Workspace reward logic.
 impl TryFrom<GoalRewardDto> for GoalReward {
+    // Reward writes are identity-checked conversions, so a client cannot turn a
+    // display-only string into an unrelated stored reward.
     type Error = CoreError;
 
     fn try_from(value: GoalRewardDto) -> Result<Self, Self::Error> {
@@ -3037,6 +3503,8 @@ impl TryFrom<GoalRewardDto> for GoalReward {
     }
 }
 
+// Summaries are derived counters and intentionally have no TryFrom: clients do
+// not write aggregate results back into Workspace.
 impl From<TimeInvestmentSummary> for TimeInvestmentSummaryDto {
     fn from(value: TimeInvestmentSummary) -> Self {
         Self {
@@ -3048,6 +3516,8 @@ impl From<TimeInvestmentSummary> for TimeInvestmentSummaryDto {
     }
 }
 
+// TodaySnapshot is another read-only projection of analytics output.  Suggestions
+// are transported as generated strings and are not treated as commands.
 impl From<TodaySnapshot> for TodaySnapshotDto {
     fn from(value: TodaySnapshot) -> Self {
         Self {
@@ -3068,7 +3538,15 @@ impl From<TodaySnapshot> for TodaySnapshotDto {
     }
 }
 
+// Analytics conversion is intentionally read-only.  Suggestions, streaks,
+// trend classifications, and SRS windows have already passed through the pure
+// Workspace algorithms and must not be recomputed with platform date rules.
+
+// SRS overview conversion preserves due/upcoming/enrolled counts calculated by
+// the shared algorithm; the facade does not recompute date windows.
 impl From<studypulse_workspace::SrsOverview> for SrsOverviewDto {
+    // SRS counts are already computed against the shared UTC window.  The FFI
+    // only transports them and must not apply client timezone adjustments.
     fn from(value: studypulse_workspace::SrsOverview) -> Self {
         Self {
             due_count: value.due_count as u64,
@@ -3078,7 +3556,11 @@ impl From<studypulse_workspace::SrsOverview> for SrsOverviewDto {
     }
 }
 
+// Daily trend points retain optional mood/energy averages and activity counters
+// exactly as the analytics function produced them.
 impl From<studypulse_workspace::DailyTrendPoint> for DailyTrendPointDto {
+    // Daily points preserve one row per calendar date, including optional mood
+    // and energy averages that may legitimately be absent.
     fn from(value: studypulse_workspace::DailyTrendPoint) -> Self {
         Self {
             date: value.date,
@@ -3093,6 +3575,8 @@ impl From<studypulse_workspace::DailyTrendPoint> for DailyTrendPointDto {
     }
 }
 
+// Subject trend strings and attention flags are already classified by the
+// domain analytics; conversion is intentionally a pure field projection.
 impl From<studypulse_workspace::SubjectTrend> for SubjectTrendDto {
     fn from(value: studypulse_workspace::SubjectTrend) -> Self {
         Self {
@@ -3111,7 +3595,14 @@ impl From<studypulse_workspace::SubjectTrend> for SubjectTrendDto {
     }
 }
 
+// TrendsSnapshot composes daily, subject, and SRS projections so Swift receives
+// one immutable analysis response without re-running calculations.
+// Analytics snapshots are read-only DTOs.  Their counters, averages, and
+// classifications are already computed by Workspace and must not be altered
+// by a platform-specific presentation adapter.
 impl From<TrendsSnapshot> for TrendsSnapshotDto {
+    // The complete trend snapshot is projected as one graph so clients cannot
+    // accidentally combine ranges or recompute the current streak differently.
     fn from(value: TrendsSnapshot) -> Self {
         Self {
             start_date: value.start_date,
@@ -3128,6 +3619,8 @@ impl From<TrendsSnapshot> for TrendsSnapshotDto {
     }
 }
 
+// A review result carries both new state and next date; exposing both avoids a
+// client guessing the next interval from quality alone.
 impl From<studypulse_workspace::SrsReviewResult> for SrsReviewResultDto {
     fn from(value: studypulse_workspace::SrsReviewResult) -> Self {
         Self {
@@ -3138,6 +3631,10 @@ impl From<studypulse_workspace::SrsReviewResult> for SrsReviewResultDto {
 }
 
 fn elapsed_seconds(timer: &ActiveTimer) -> i64 {
+    // Timer elapsed time uses monotonic Instants for the active segment and a
+    // stored accumulator for paused segments; wall-clock changes are irrelevant.
+    // Combine paused accumulation with the current monotonic segment.  This is
+    // process-local elapsed time, not a wall-clock difference that can jump.
     timer.elapsed_before_pause
         + timer
             .running_since
@@ -3146,6 +3643,10 @@ fn elapsed_seconds(timer: &ActiveTimer) -> i64 {
 }
 
 fn timer_snapshot(timer: &ActiveTimer) -> TimerSnapshotDto {
+    // A timer snapshot is derived state.  Only lifecycle commands mutate the
+    // hidden timer, so a DTO read cannot extend or finish a session.
+    // Snapshot status is derived from `running_since`; callers never mutate the
+    // hidden Instant or bypass the timer lifecycle methods.
     TimerSnapshotDto {
         status: if timer.running_since.is_some() {
             TimerStatusKindDto::Running
@@ -3161,7 +3662,13 @@ fn timer_snapshot(timer: &ActiveTimer) -> TimerSnapshotDto {
     }
 }
 
+// Auth token conversion is kept narrow and local to the provider edge.  The
+// facade can transport tokens to secure host storage, but account/status DTOs do
+// not contain them.
 impl From<CloudAuthTokens> for CloudAuthTokensDto {
+    // Authentication results are projected only after the provider has
+    // validated their prefixes.  Storage policy is enforced by the host, while
+    // this conversion keeps the record shape stable for the handoff.
     fn from(value: CloudAuthTokens) -> Self {
         Self {
             access_token: value.access_token,
@@ -3170,7 +3677,11 @@ impl From<CloudAuthTokens> for CloudAuthTokensDto {
     }
 }
 
+// CloudProfile becomes a redacted account view with plan/model metadata; no
+// access or refresh token is copied into this status structure.
 impl From<CloudProfile> for CloudAccountDto {
+    // Profile projection contains account capability/status fields only; it
+    // deliberately has no token or provider client reference.
     fn from(value: CloudProfile) -> Self {
         Self {
             email: value.email,
@@ -3183,6 +3694,8 @@ impl From<CloudProfile> for CloudAccountDto {
     }
 }
 
+// BYOK configuration is deliberately non-secret.  This conversion is safe to
+// return to UI because the client key is owned by OpenAICompatibleModelClient.
 impl From<ByokConfig> for ByokConfigDto {
     fn from(value: ByokConfig) -> Self {
         Self {
@@ -3192,6 +3705,12 @@ impl From<ByokConfig> for ByokConfigDto {
     }
 }
 
+// The remaining projections describe Agent and backup state.  They preserve
+// event cursors, permission labels, and recovery identifiers exactly because UI
+// behavior depends on those values being stable across polling calls.
+
+// File entries expose relative metadata only.  Path resolution and symlink
+// checks remain in Workspace when a source is actually opened.
 impl From<FileEntry> for FileEntryDto {
     fn from(value: FileEntry) -> Self {
         Self {
@@ -3203,7 +3722,14 @@ impl From<FileEntry> for FileEntryDto {
     }
 }
 
+// Notebook conversion recursively projects messages and source selection.  It
+// does not read files or run tools, so serialization remains a pure snapshot.
+// Notebook projection carries source selection and transcript history, but no
+// live Agent runtime.  That distinction prevents a saved notebook from being
+// mistaken for an active run after app restart.
 impl From<AgentNotebook> for AgentNotebookDto {
+    // Notebook projection is a pure snapshot of local history and selected
+    // paths; it does not expose live locks, providers, or execution handles.
     fn from(value: AgentNotebook) -> Self {
         Self {
             id: value.id.to_string(),
@@ -3217,7 +3743,13 @@ impl From<AgentNotebook> for AgentNotebookDto {
     }
 }
 
+// Incoming notebook DTOs are parsed back into domain values before Workspace
+// writes them; this keeps message/history validation out of Swift.
+// Notebook TryFrom is the write-side protection for source paths and message
+// history; it runs before the identity-checked notebook save.
 impl TryFrom<AgentNotebookDto> for AgentNotebook {
+    // Notebook input is the write-side gate for ids, message roles, and source
+    // selection.  Execution still requires a separate Agent command.
     type Error = CoreError;
 
     fn try_from(value: AgentNotebookDto) -> Result<Self, Self::Error> {
@@ -3237,6 +3769,8 @@ impl TryFrom<AgentNotebookDto> for AgentNotebook {
     }
 }
 
+// Agent messages use an explicit role mapping so the Swift enum cannot depend on
+// serde's Rust enum representation.
 impl From<AgentMessage> for AgentMessageDto {
     fn from(value: AgentMessage) -> Self {
         Self {
@@ -3251,6 +3785,10 @@ impl From<AgentMessage> for AgentMessageDto {
     }
 }
 
+// The reverse role mapping is exhaustive and preserves the original timestamp
+// string for Workspace validation.
+// Agent message input maps the FFI role enum and preserves content/timestamps;
+// it does not execute the represented conversation.
 impl TryFrom<AgentMessageDto> for AgentMessage {
     type Error = CoreError;
 
@@ -3267,6 +3805,8 @@ impl TryFrom<AgentMessageDto> for AgentMessage {
     }
 }
 
+// Search matches contain bounded snippets and relative paths; conversion does
+// not canonicalize or open the path a second time.
 impl From<SearchMatch> for SearchMatchDto {
     fn from(value: SearchMatch) -> Self {
         Self {
@@ -3277,7 +3817,11 @@ impl From<SearchMatch> for SearchMatchDto {
     }
 }
 
+// Permission conversion mirrors the host risk taxonomy.  It is descriptive
+// metadata and never substitutes for AgentRuntime confirmation.
 impl From<PermissionLevel> for PermissionDto {
+    // Permission labels are advisory metadata for presentation.  Runtime
+    // confirmation remains authoritative even if a client displays the value.
     fn from(value: PermissionLevel) -> Self {
         match value {
             PermissionLevel::Read => Self::Read,
@@ -3288,6 +3832,8 @@ impl From<PermissionLevel> for PermissionDto {
     }
 }
 
+// Run status conversion keeps transitional and terminal states distinct so a
+// Swift poller can render cancellation/confirmation accurately.
 impl From<RunStatus> for RunStatusDto {
     fn from(value: RunStatus) -> Self {
         match value {
@@ -3302,7 +3848,11 @@ impl From<RunStatus> for RunStatusDto {
     }
 }
 
+// Event-kind conversion is exhaustive because adding a runtime event must also
+// be reflected in the generated Swift enum and client polling logic.
 impl From<AgentEventKind> for AgentEventKindDto {
+    // Event kind mapping is exhaustive so a new runtime event cannot silently
+    // disappear from Swift polling or UI rendering.
     fn from(value: AgentEventKind) -> Self {
         match value {
             AgentEventKind::Started => Self::Started,
@@ -3323,7 +3873,14 @@ impl From<AgentEventKind> for AgentEventKindDto {
     }
 }
 
+// AgentEvent projection preserves the sequence cursor and all optional payloads
+// verbatim.  The FFI must not reorder, renumber, or use vector indices here.
+// Event projection is protocol-sensitive: sequence remains monotonic, timestamp
+// remains the runtime's RFC3339 value, and optional fields are copied without
+// changing their meaning based on UI assumptions.
 impl From<AgentEvent> for AgentEventDto {
+    // Event projection keeps sequence and optional payloads untouched.  The FFI
+    // must never renumber events based on the vector position.
     fn from(value: AgentEvent) -> Self {
         Self {
             run_id: value.run_id,
@@ -3345,7 +3902,11 @@ impl From<AgentEvent> for AgentEventDto {
     }
 }
 
+// Mode conversion keeps the public list synchronized with AgentRuntime's
+// capability manifests and serialized mode names.
 impl From<AgentMode> for AgentModeDto {
+    // Mode values mirror the Agent capability manifest and remain explicit for
+    // generated clients rather than relying on serde spelling conventions.
     fn from(value: AgentMode) -> Self {
         match value {
             AgentMode::Chat => Self::Chat,
@@ -3361,6 +3922,8 @@ impl From<AgentMode> for AgentModeDto {
     }
 }
 
+// Incoming mode values are exhaustive and cannot introduce a mode that the
+// runtime has not implemented.
 impl From<AgentModeDto> for AgentMode {
     fn from(value: AgentModeDto) -> Self {
         match value {
@@ -3377,7 +3940,11 @@ impl From<AgentModeDto> for AgentMode {
     }
 }
 
+// Capability manifests are immutable snapshots of stage labels and loop caps;
+// clients display them but do not get to mutate runtime limits.
 impl From<CapabilityManifest> for CapabilityManifestDto {
+    // Capability DTOs are snapshots of the runtime manifest.  Clients may
+    // render stage labels, but loop caps remain enforced in AgentRuntime.
     fn from(value: CapabilityManifest) -> Self {
         Self {
             mode: value.mode.into(),
@@ -3389,7 +3956,14 @@ impl From<CapabilityManifest> for CapabilityManifestDto {
     }
 }
 
+// BackupInspectionDto is a pre-apply report.  Conflict keys and warnings are
+// exposed for UI resolution, while the staged archive remains Rust-owned.
+// Backup inspection is intentionally a borrowed projection: creating the DTO
+// does not consume or apply the staged inspection, so the same id can be used
+// for a later resolution command.
 impl From<&BackupInspection> for BackupInspectionDto {
+    // Inspection is borrowed because the staged archive remains owned by the
+    // facade until apply or cancel; projecting it must not consume that state.
     fn from(value: &BackupInspection) -> Self {
         Self {
             id: value.id.clone(),
@@ -3412,7 +3986,14 @@ impl From<&BackupInspection> for BackupInspectionDto {
     }
 }
 
+// Import reports carry counts and the recovery path produced by Workspace after
+// apply.  The facade does not hide recovery information from the client.
 impl From<ImportReport> for ImportReportDto {
+    // Applying a backup returns counts and a recovery path, so clients can
+    // explain exactly what changed and where to recover if a later operation
+    // needs to be reversed.
+    // Import results include recovery information by design, allowing the UI to
+    // surface the restore point instead of hiding a safety-critical path.
     fn from(value: ImportReport) -> Self {
         Self {
             imported_records: value.imported_records,
@@ -3423,8 +4004,26 @@ impl From<ImportReport> for ImportReportDto {
     }
 }
 
+// Facade tests should exercise public lifecycle methods rather than private
+// implementation details.  They are especially valuable here because a DTO
+// conversion can compile while still changing a wire spelling or dropping an
+// extension field.  Temporary Workspaces keep these checks local and prevent
+// test state from touching a user's actual study data.
+//
+// Agent tests also assert that event sequence is exclusive, terminal states
+// release the active slot, and confirmation remains required for writes.  The
+// timer and backup tests cover process-local state separately from persisted
+// Workspace records, preserving the distinction documented by the facade.
+//
+// Keeping these assertions near the facade also catches accidental changes to
+// generated Swift signatures when a Rust domain type gains a new field.  A
+// passing domain test alone would not prove that the transport projection is
+// still compatible with existing desktop clients.
 #[cfg(test)]
 mod tests {
+    // Facade tests exercise the public lifecycle through temporary Workspaces:
+    // DTO conversion, Agent event/cursor behavior, SRS round trips, and the
+    // guarantee that process-local state does not masquerade as persistence.
     use super::*;
 
     #[test]

@@ -4,8 +4,12 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 export type Language = "zh-CN" | "zh-TW" | "en" | "ja" | "ko";
 export type Translate = (key: string, variables?: Record<string, string | number>) => string;
 
+// Language preference is app-local UI state. It is persisted separately from
+// workspace records so opening another workspace does not change the language.
 const LANGUAGE_STORAGE_KEY = "studypulse.language";
 
+// The option order is also the stable order used by the Settings select; keep
+// values aligned with the dictionary keys and browser-language detection.
 export const languageOptions: { value: Language; label: string }[] = [
   { value: "zh-CN", label: "简体中文" },
   { value: "zh-TW", label: "繁體中文" },
@@ -15,6 +19,8 @@ export const languageOptions: { value: Language; label: string }[] = [
 ];
 
 function detectLanguage(): Language {
+  // Detection prefers an explicit local choice, then maps browser locale
+  // prefixes. Server/Node rendering has no browser and safely defaults to en.
   if (typeof window === "undefined") return "en";
   const saved = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
   if (languageOptions.some((option) => option.value === saved)) return saved as Language;
@@ -26,6 +32,8 @@ function detectLanguage(): Language {
   return "en";
 }
 
+// `en` is the fallback dictionary and also documents the complete base key
+// space. Feature dictionaries below are merged into it by language.
 const en: Record<string, string> = {
   "nav.today": "Today", "nav.agent": "Agent", "nav.tasks": "Tasks", "nav.subjects": "Subjects & Grades", "nav.exams": "Exams", "nav.mistakes": "Mistakes", "nav.timer": "Study Timer", "nav.investment": "Time Investment", "nav.library": "Library", "nav.settings": "Settings", "nav.aria": "StudyPulse sections",
   "brand.localWorkspace": "Local-first workspace", "workspace.default": "Workspace", "local.stored": "Stored on this Mac",
@@ -47,6 +55,8 @@ const en: Record<string, string> = {
   "dialog.openWorkspace": "Open StudyPulse Workspace", "dialog.createWorkspace": "Create StudyPulse Workspace", "dialog.addSources": "Add Notebook Sources", "dialog.inspectBackup": "Inspect StudyPulse Backup", "dialog.exportBackup": "Export StudyPulse Backup",
 };
 
+// The base translations intentionally remain separate from P1/P2 additions so
+// feature pages can be reviewed as coherent dictionary groups.
 const zhCN: Record<string, string> = {
   "nav.today": "今天", "nav.agent": "Agent", "nav.tasks": "任务", "nav.subjects": "科目与成绩", "nav.exams": "考试", "nav.mistakes": "错题", "nav.timer": "学习计时器", "nav.investment": "时间投入", "nav.library": "资料库", "nav.settings": "设置", "nav.aria": "StudyPulse 分区",
   "brand.localWorkspace": "本地优先工作区", "workspace.default": "工作区", "local.stored": "储存在这台 Mac 上", "top.learningRhythm": "你的学习节奏", "top.greeting": "很高兴见到你。", "top.importBackup": "导入备份", "top.exportBackup": "导出备份", "loading.opening": "正在打开本地工作区…", "loading.failed": "StudyPulse 无法启动", "common.retry": "重试", "error.generic": "出了点问题。", "error.section": "无法加载此分区",
@@ -102,6 +112,8 @@ const ko: Record<string, string> = {
   "settings.title": "설정", "settings.description": "로컬 클라이언트를 위한 조용한 제어 항목입니다.", "settings.appearance": "모양", "settings.appearanceTitle": "나만의 공간으로 만들기", "settings.theme": "테마", "settings.themeDescription": "따뜻한 라이트 캔버스나 부드러운 다크 모드를 사용하세요.", "settings.language": "언어", "settings.languageDescription": "StudyPulse 전체에서 사용할 언어를 선택하세요.", "settings.provider": "Agent 제공자", "settings.providerTitle": "필요할 때 연결", "settings.providerDescription": "AI에 연결하지 않아도 로컬 워크스페이스는 유용합니다.", "settings.cloudConnected": "Cloud AI 연결됨", "settings.byokConnected": "BYOK 연결됨", "settings.notConnected": "연결 안 됨", "settings.cloudName": "StudyPulse Cloud AI", "settings.cloudCopy": "안전한 웹 흐름으로 로그인합니다. 토큰은 macOS 키체인에 보관됩니다.", "settings.signIn": "로그인", "settings.working": "처리 중…", "settings.byokName": "BYOK · OpenAI 호환", "settings.byokCopy": "자신의 엔드포인트를 사용하세요. 저장 후 키는 다시 표시되지 않습니다.", "settings.baseUrl": "기본 URL", "settings.model": "모델", "settings.savedKey": "저장된 키 · 유지하려면 비워 두세요", "settings.apiKey": "API 키", "settings.saveByok": "BYOK 저장", "settings.saving": "저장 중…", "settings.disconnect": "연결 해제 및 저장된 자격 증명 제거", "settings.privacy": "개인정보 보호", "settings.privacyTitle": "의도적으로 로컬 우선", "settings.privacyCopy": "워크스페이스 기록, Agent 실행, 노트북 기록은 선택한 로컬 디렉터리에 남습니다. StudyPulse는 브라우저 localhost 서비스를 노출하지 않습니다.", "language.label": "언어", "duration.hours": "{count}시간", "duration.minutes": "{count}분", "theme.light": "라이트", "theme.dark": "다크", "taskType.homework": "숙제", "taskType.reading": "읽기", "event.started": "시작됨", "event.statusChanged": "상태 변경", "event.textDelta": "텍스트 변경", "event.toolRequested": "도구 요청", "event.toolCompleted": "도구 완료", "event.confirmationRequired": "확인 필요", "event.stageStarted": "단계 시작", "event.stageProgress": "단계 진행", "event.stageCompleted": "단계 완료", "event.inputRequired": "입력 필요", "event.artifactCreated": "결과물 생성", "event.failed": "실패", "event.cancelled": "취소됨", "event.completed": "완료", "mode.chat": "채팅", "mode.deepSolve": "심층 풀이", "mode.mastery": "숙달", "mode.deepResearch": "심층 조사", "mode.questionLab": "질문 연구실", "mode.visualize": "시각화", "dialog.openWorkspace": "StudyPulse 워크스페이스 열기", "dialog.createWorkspace": "StudyPulse 워크스페이스 만들기", "dialog.addSources": "노트북 자료 추가", "dialog.inspectBackup": "StudyPulse 백업 검사", "dialog.exportBackup": "StudyPulse 백업 내보내기",
 };
 
+// P1 keys belong to Diary, Trends, and Flashcards. They are merged after base
+// dictionaries so feature-specific wording can override a shared key.
 const p1En: Record<string, string> = {
   "nav.diary": "Diary", "nav.trends": "Trends", "nav.flashcards": "Flashcards",
   "diary.title": "Learning Diary", "diary.description": "A small daily record for mood, energy and what you learned.", "diary.new": "New entry", "diary.edit": "Edit entry", "diary.entryTitle": "Daily check-in", "diary.entryDescription": "Multiple entries on the same day are supported.", "diary.date": "Date", "diary.mood": "Mood", "diary.energy": "Energy", "diary.tag": "Energy tag", "diary.tagPlaceholder": "e.g. focused, tired", "diary.content": "Markdown note", "diary.contentPlaceholder": "What happened today?", "diary.update": "Update entry", "diary.save": "Save entry", "diary.cancel": "Cancel", "diary.trendTitle": "Recent rhythm", "diary.trendDescription": "Your daily mood and energy over the last 30 days.", "diary.activeDays": "active days", "diary.studyMinutes": "study minutes", "diary.energyShort": "energy", "diary.history": "Diary history", "diary.historyDescription": "Your entries, kept local and easy to revisit.", "diary.delete": "Delete", "diary.noContent": "No note content.", "diary.empty": "No diary entries yet", "diary.emptyCopy": "Start with a quick mood and a sentence about today.", "diary.validationDate": "Please choose a date.", "diary.confirmDelete": "Delete this diary entry?",
@@ -142,6 +154,8 @@ const p1Ko: Record<string, string> = {
   "mistakes.enroll": "복습 대기열에 추가", "mistakes.easy": "쉬움",
 };
 
+// P2 keys cover Coach, Exam Simulation, Reverse Planner, and Reports. The
+// current dictionary map below intentionally exposes only the existing keys.
 const p2En: Record<string, string> = {
   "exams.comprehensive": "Comprehensive exams", "exams.comprehensiveDescription": "Plan a combined exam across multiple subjects.", "exams.subjectsComma": "Subjects, comma separated", "exams.comprehensiveEmpty": "No comprehensive exams yet.",
   "nav.coach": "AI Coach", "nav.simulation": "Exam Simulator", "nav.planner": "Reverse Planner", "nav.reports": "Reports",
@@ -164,6 +178,8 @@ const p2ZhCN: Record<string, string> = {
   "mode.coach": "AI 教练", "mode.examSimulation": "考试模拟", "mode.reversePlanner": "Reverse Planner",
 };
 
+// Interface style labels are kept in a small complete five-language map so the
+// independent Apple/Anthropic selector does not depend on P1/P2 dictionaries.
 const interfaceStyleTranslations: Record<Language, Record<string, string>> = {
   en: {
     "settings.interfaceStyle": "Interface style", "settings.interfaceStyleDescription": "Choose the visual language for your workspace.", "style.anthropic": "Anthropic", "style.anthropicDescription": "Warm, editorial, reflective", "style.apple": "Apple", "style.appleDescription": "Clear, native, focused",
@@ -182,6 +198,9 @@ const interfaceStyleTranslations: Record<Language, Record<string, string>> = {
   },
 };
 
+// Merge order matters: base language, style labels, then feature group. The
+// zh-TW/ja/ko maps currently omit P2 bundles, so `t` falls back to English for
+// those missing feature keys rather than pretending the bundles are complete.
 const dictionaries: Record<Language, Record<string, string>> = {
   en: { ...en, ...interfaceStyleTranslations.en, ...p1En, ...p2En },
   "zh-CN": { ...zhCN, ...interfaceStyleTranslations["zh-CN"], ...p1ZhCN, ...p2ZhCN },
@@ -191,15 +210,21 @@ const dictionaries: Record<Language, Record<string, string>> = {
 };
 
 function interpolate(template: string, variables?: Record<string, string | number>): string {
+  // Only simple word placeholders are supported. A missing variable remains
+  // visible as `{name}`, which makes incomplete call sites diagnosable.
   if (!variables) return template;
   return template.replace(/\{(\w+)\}/g, (_, key: string) => String(variables[key] ?? `{${key}}`));
 }
 
 export function languageLocale(language: Language): string {
+  // Date/report APIs expect the conventional en-US locale while other app
+  // languages already use the locale identifier accepted by Intl.
   return language === "en" ? "en-US" : language;
 }
 
 export function localizeEnum(t: Translate, prefix: string, value: string): string {
+  // Enum labels are optional translations. Returning the original value keeps
+  // new Core enum variants readable until a dictionary key is added.
   return t(`${prefix}.${value}`) === `${prefix}.${value}` ? value : t(`${prefix}.${value}`);
 }
 
@@ -212,6 +237,8 @@ interface I18nValue {
 const I18nContext = createContext<I18nValue | null>(null);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
+  // The provider owns language state and persistence; consumers only receive a
+  // stable translator that resolves the active dictionary on each language.
   const [language, setLanguageState] = useState<Language>(detectLanguage);
   const setLanguage = (next: Language) => {
     setLanguageState(next);
@@ -226,6 +253,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 }
 
 export function useI18n(): I18nValue {
+  // Failing at the hook boundary catches incorrectly mounted pages early,
+  // rather than producing untranslated keys deep inside a component tree.
   const value = useContext(I18nContext);
   if (!value) throw new Error("useI18n must be used inside I18nProvider");
   return value;

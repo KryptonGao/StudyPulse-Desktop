@@ -1,3 +1,24 @@
+//! Pure calculations over already-loaded Workspace values.
+//!
+//! No function in this module writes files or consults process state beyond
+//! the `now` argument.  That keeps trends, streaks, and SRS updates reusable
+//! from the desktop UI, tests, widgets, and future background callers while
+//! making the UTC/date boundaries explicit at each call site.
+//!
+//! Trend ranges are inclusive and are clamped before daily buckets are built.
+//! Diary dimensions are averaged per day, mastery history contributes review
+//! activity on its own timestamp, and session minutes contribute only when a
+//! session is completed. Subject direction uses the most recent three grades,
+//! while SRS due/upcoming counts compare parsed UTC instants to the injected
+//! reference time. These choices are product semantics, not presentation hints.
+//!
+//! The functions tolerate malformed dates while reading historical values, but
+//! model validation prevents new malformed values from being written. That
+//! asymmetry keeps dashboards resilient to old data without weakening the write
+//! boundary or changing the meaning of valid records.
+//!
+//! Callers should pass one consistent UTC `now` through related calculations so
+//! due counts, streaks, and date windows agree at midnight boundaries.
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
@@ -8,12 +29,14 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
+/// Result of one review: the updated state plus the canonical next date.
 pub struct SrsReviewResult {
     pub state: ReviewState,
     pub next_review_date: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Counts for mistakes enrolled in SRS, split into due and near-future work.
 pub struct SrsOverview {
     pub due_count: usize,
     pub upcoming_count: usize,
@@ -21,6 +44,9 @@ pub struct SrsOverview {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// One calendar-day bucket used by the trends graph and streak calculation.
+/// Activity points intentionally combine unlike signals into a stable product
+/// metric: minutes + reviews + five points per recorded grade.
 pub struct DailyTrendPoint {
     pub date: String,
     pub study_minutes: i64,
@@ -33,6 +59,7 @@ pub struct DailyTrendPoint {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Grade and wrong-question summary for a single subject in the selected range.
 pub struct SubjectTrend {
     pub subject: String,
     pub display_name: String,
@@ -48,6 +75,7 @@ pub struct SubjectTrend {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Complete bounded trends response, including daily points and SRS counts.
 pub struct TrendsSnapshot {
     pub start_date: String,
     pub end_date: String,
@@ -62,12 +90,16 @@ pub struct TrendsSnapshot {
 }
 
 fn date_key(value: &str) -> Option<chrono::NaiveDate> {
+    // Date grouping uses the instant's calendar date after parsing its offset;
+    // malformed records are ignored here because model validation owns writes.
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|date| date.date_naive())
 }
 
 fn score_rate(grade: &Grade, subjects: &HashMap<String, &Subject>) -> f64 {
+    // Prefer the grade's captured scale, then the current subject definition,
+    // and finally 100 for old records that supplied neither value.
     let full_score = grade
         .full_score
         .or_else(|| {
@@ -81,6 +113,8 @@ fn score_rate(grade: &Grade, subjects: &HashMap<String, &Subject>) -> f64 {
 }
 
 pub fn srs_overview(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> SrsOverview {
+    // The seven-day window is exclusive of due items: an item due now belongs
+    // to `due_count`, not both buckets.
     let upcoming_cutoff = now + Duration::days(7);
     let mut result = SrsOverview {
         due_count: 0,
@@ -88,10 +122,14 @@ pub fn srs_overview(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> SrsOver
         total_enrolled: 0,
     };
     for mistake in mistakes {
+        // A missing review state means the mistake has not entered the SRS
+        // queue and therefore should not inflate enrollment counts.
         let Some(state) = mistake.review_state.as_ref() else {
             continue;
         };
         result.total_enrolled += 1;
+        // Parse failures do not become due items because there is no trustworthy
+        // instant to compare; the persisted validator reports them on writes.
         let Some(next) = DateTime::parse_from_rfc3339(&state.next_review_date)
             .ok()
             .map(|date| date.with_timezone(&Utc))
@@ -99,6 +137,7 @@ pub fn srs_overview(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> SrsOver
             continue;
         };
         if next <= now {
+            // Due is inclusive, so an item scheduled exactly at `now` is ready.
             result.due_count += 1;
         } else if next <= upcoming_cutoff {
             result.upcoming_count += 1;
@@ -108,16 +147,20 @@ pub fn srs_overview(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> SrsOver
 }
 
 fn activity_streak(points: &[DailyTrendPoint], today: chrono::NaiveDate) -> i64 {
+    // Work from a set of active dates so multiple signals on one day count once
+    // and a no-activity current day still allows yesterday's streak to display.
     let active: HashSet<_> = points
         .iter()
         .filter(|point| point.activity_points > 0)
         .filter_map(|point| chrono::NaiveDate::parse_from_str(&point.date, "%Y-%m-%d").ok())
         .collect();
+    // A current inactive day does not erase yesterday's consecutive run.
     let mut cursor = today;
     if !active.contains(&cursor) {
         cursor -= Duration::days(1);
     }
     let mut streak = 0;
+    // Walk backward until the first gap; the returned value is a day count.
     while active.contains(&cursor) {
         streak += 1;
         cursor -= Duration::days(1);
@@ -134,14 +177,20 @@ pub fn learning_trends(
     mistakes: &[MistakeNoteFull],
     sessions: &[StudySession],
 ) -> TrendsSnapshot {
+    // Clamp the range at the pure-function boundary so callers cannot request
+    // an unbounded allocation or a zero-day snapshot.
     let days = range_days.clamp(1, 90) as i64;
     let end = now.date_naive();
     let start = end - Duration::days(days - 1);
+    // Subject names are the cross-file join key used by grades, mistakes, and
+    // display metadata; the grade's own subject string remains authoritative.
     let subject_map: HashMap<_, _> = subjects
         .iter()
         .map(|subject| (subject.name.clone(), subject))
         .collect();
 
+    // Pre-seed every date; consumers can render continuous axes without
+    // inventing missing zero-activity points themselves.
     let mut daily: BTreeMap<chrono::NaiveDate, DailyTrendPoint> = (0..days)
         .map(|offset| {
             let date = start + Duration::days(offset);
@@ -160,9 +209,12 @@ pub fn learning_trends(
             )
         })
         .collect();
+    // Diaries are collected first because several entries may share a date and
+    // must be averaged only after all values for that date are known.
     let mut diary_scores: HashMap<chrono::NaiveDate, Vec<(i64, i64)>> = HashMap::new();
 
     for diary in diaries {
+        // Date parsing is intentionally non-panicking for read-only dashboards.
         let Some(day) = date_key(&diary.date) else {
             continue;
         };
@@ -176,6 +228,8 @@ pub fn learning_trends(
         .iter()
         .filter(|session| session.completed && session.duration_seconds > 0)
     {
+        // Only completed positive-duration sessions represent actual study;
+        // drafts and zero-length timer events do not contribute activity.
         let Some(day) = date_key(&session.start_date) else {
             continue;
         };
@@ -186,6 +240,8 @@ pub fn learning_trends(
         point.completed_session_count += 1;
     }
     for grade in grades {
+        // A grade contributes one activity event regardless of score magnitude;
+        // score quality is reported separately in SubjectTrend.
         let Some(day) = date_key(&grade.date) else {
             continue;
         };
@@ -194,6 +250,8 @@ pub fn learning_trends(
         }
     }
     for mistake in mistakes {
+        // Review activity is sourced from mastery history rather than the
+        // mistake creation date, which keeps later reviews on their real days.
         for history in &mistake.mastery_history {
             let Some(day) = date_key(&history.timestamp) else {
                 continue;
@@ -204,8 +262,12 @@ pub fn learning_trends(
         }
     }
     for (day, scores) in diary_scores {
+        // Only dates in the pre-seeded range can have been inserted above, so a
+        // missing bucket here means the record was outside the requested range.
         if let Some(point) = daily.get_mut(&day) {
             let count = scores.len() as f64;
+            // Mood and energy are independent means; one missing dimension in
+            // a future payload should not be substituted for the other.
             point.mood_score =
                 Some(scores.iter().map(|(mood, _)| *mood as f64).sum::<f64>() / count);
             point.energy_score =
@@ -214,10 +276,14 @@ pub fn learning_trends(
     }
     let mut daily_points: Vec<_> = daily.into_values().collect();
     for point in &mut daily_points {
+        // Keep this weighting in one place so active-day and streak semantics
+        // use the same definition as the UI summary.
         point.activity_points =
             point.study_minutes + point.review_count as i64 + point.grade_count as i64 * 5;
     }
 
+    // Build subject-local grade views after daily aggregation so the two outputs
+    // can evolve independently without mutating the input slices.
     let mut grade_groups: HashMap<String, Vec<&Grade>> = HashMap::new();
     for grade in grades {
         if date_key(&grade.date).is_some_and(|day| day >= start && day <= end) {
@@ -230,7 +296,11 @@ pub fn learning_trends(
     let due = due_mistakes(mistakes, now);
     let mut subjects_result = Vec::new();
     for (subject, mut values) in grade_groups {
+        // Sorting before selecting the last three makes the direction metric
+        // deterministic even when the input files are append-order mixed.
         values.sort_by_key(|grade| date_key(&grade.date));
+        // Normalize each score before averaging; mixed full-score exams remain
+        // comparable within one subject.
         let rates: Vec<_> = values
             .iter()
             .map(|grade| score_rate(grade, &subject_map))
@@ -240,6 +310,7 @@ pub fn learning_trends(
         let first = recent.last().copied().unwrap_or(average);
         let last = recent.first().copied().unwrap_or(average);
         let change = last - first;
+        // Thresholds deliberately ignore small noise around a steady result.
         let trend = if change > 0.05 {
             "rising"
         } else if change < -0.05 {
@@ -247,6 +318,8 @@ pub fn learning_trends(
         } else {
             "steady"
         };
+        // Rankings are optional and are averaged only over records that supply
+        // them, rather than treating missing data as zero.
         let rankings: Vec<_> = values.iter().filter_map(|grade| grade.ranking).collect();
         let subject_mistakes: Vec<_> = mistakes
             .iter()
@@ -275,11 +348,15 @@ pub fn learning_trends(
             mistake_count: subject_mistakes.len(),
             due_mistake_count: due_mistakes,
             trend: trend.into(),
+            // Attention requires enough recent evidence and is triggered by
+            // either low recent mastery or a meaningful downward change.
             needs_attention: recent.len() >= 2
                 && (recent.iter().sum::<f64>() / (recent.len() as f64) < 0.7 || change < -0.15),
         });
     }
     subjects_result.sort_by(|left, right| left.subject.cmp(&right.subject));
+    // Global mood/energy means use only days with data, not the zero-filled
+    // buckets introduced for a continuous chart.
     let mood_values: Vec<_> = daily_points
         .iter()
         .filter_map(|point| point.mood_score)
@@ -288,7 +365,10 @@ pub fn learning_trends(
         .iter()
         .filter_map(|point| point.energy_score)
         .collect();
+    // Compute SRS once from the same `now` used for the range and streak.
     let srs = srs_overview(mistakes, now);
+    // Construct the snapshot last so all derived counts use the same bounded
+    // daily vector and the same SRS reference instant.
     TrendsSnapshot {
         start_date: start.to_string(),
         end_date: end.to_string(),
@@ -315,6 +395,8 @@ pub fn apply_srs(
     difficulty: i64,
     now: DateTime<Utc>,
 ) -> SrsReviewResult {
+    // Start new cards with the same SM-2 defaults as the iOS implementation;
+    // cloning an existing state also preserves its unknown extension fields.
     let mut current = state.cloned().unwrap_or(ReviewState {
         repetitions: 0,
         ease_factor: 2.5,
@@ -324,7 +406,11 @@ pub fn apply_srs(
         lapses: 0,
         extra: Default::default(),
     });
+    // The wire contract uses 1/3/4/5, but clamp malformed callers before the
+    // match so any out-of-range value follows the hardest-success path safely.
     let quality = quality.clamp(1, 5);
+    // Quality 1 is Again, 3 Hard, 4 Good, and 5 Easy; quality 2 follows the
+    // default branch after clamping to retain the historical compatibility rule.
     match quality {
         1 => {
             current.repetitions = 0;
@@ -360,6 +446,8 @@ pub fn apply_srs(
             current.ease_factor = (current.ease_factor + 0.15).min(3.0);
         }
     }
+    // Difficulty adjusts the interval after the quality-specific SM-2 update;
+    // unknown difficulty values intentionally retain a neutral multiplier.
     let multiplier = match difficulty {
         1 => 0.5,
         2 => 0.75,
@@ -367,9 +455,13 @@ pub fn apply_srs(
         5 => 1.6,
         _ => 1.0,
     };
+    // Round after applying difficulty so intervals remain integral days and are
+    // never reduced below one day.
     current.interval_days = ((current.interval_days as f64) * multiplier)
         .round()
         .max(1.0) as i64;
+    // Review dates are based on UTC midnight rather than the review instant so
+    // all clients agree on the same calendar day around timezone boundaries.
     let next = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
         + Duration::days(current.interval_days);
     current.next_review_date = next.to_rfc3339();
@@ -381,9 +473,12 @@ pub fn apply_srs(
 }
 
 pub fn due_mistakes(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> Vec<&MistakeNoteFull> {
+    // Invalid or missing next dates are ignored here; validation rejects them
+    // on writes, while read-only analytics remains resilient to old data.
     mistakes
         .iter()
         .filter(|mistake| {
+            // Review state is optional: `None` means not enrolled, not due.
             mistake
                 .review_state
                 .as_ref()
@@ -394,6 +489,7 @@ pub fn due_mistakes(mistakes: &[MistakeNoteFull], now: DateTime<Utc>) -> Vec<&Mi
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Direct and aggregate time spent for one investment target.
 pub struct TimeInvestmentSummary {
     pub target_id: String,
     pub direct_seconds: i64,
@@ -406,6 +502,8 @@ pub fn investment_summary(
     sub_tasks: &[SubTask],
     sessions: &[StudySession],
 ) -> Vec<TimeInvestmentSummary> {
+    // Build the child index once so each subtask can include its descendants
+    // without repeatedly scanning the full list.
     let mut results = Vec::new();
     let children: HashMap<_, Vec<_>> = sub_tasks.iter().fold(HashMap::new(), |mut map, task| {
         map.entry(task.parent_sub_task_id)
@@ -414,6 +512,8 @@ pub fn investment_summary(
         map
     });
     for subject in subjects {
+        // Subject totals include sessions targeted directly at the subject and
+        // sessions targeted at any immediate/deep descendant subtask.
         let matching_subtasks: HashSet<_> = sub_tasks
             .iter()
             .filter(|task| task.subject_id == subject.id)
@@ -430,6 +530,9 @@ pub fn investment_summary(
         ));
     }
     for task in sub_tasks {
+        // Walk downward from the current task; cycles are harmless because the
+        // set prevents revisiting a UUID, while preserving the existing model's
+        // tree-oriented aggregation semantics.
         let mut included = HashSet::from([task.id]);
         let mut pending = vec![task.id];
         while let Some(parent) = pending.pop() {
@@ -453,6 +556,9 @@ fn summary_for_target(
     sessions: &[StudySession],
     matches: impl Fn(Option<&InvestmentTarget>) -> bool,
 ) -> TimeInvestmentSummary {
+    // Only completed, positive sessions count as investment. `direct_seconds`
+    // is currently also the total because this function receives one closure
+    // that already captures the target's descendants.
     let matching = sessions.iter().filter(|session| {
         session.completed
             && session.duration_seconds > 0
@@ -461,6 +567,8 @@ fn summary_for_target(
     let mut direct_seconds = 0;
     let mut session_count = 0;
     for session in matching {
+        // A completed timer may be reopened/upserted, but only its positive
+        // completed duration represents real investment.
         direct_seconds += session.duration_seconds;
         session_count += 1;
     }
@@ -473,11 +581,15 @@ fn summary_for_target(
 }
 
 pub fn current_streak(sessions: &[StudySession], now: DateTime<Utc>) -> i64 {
+    // Expand sessions across every calendar date they touch, so an interval
+    // crossing midnight contributes to both days without double-counting a day.
     let mut days = HashSet::new();
     for session in sessions
         .iter()
         .filter(|session| session.completed && session.duration_seconds > 0)
     {
+        // Invalid start dates fall back to `now`, preserving the existing
+        // read-only streak behavior without panicking on legacy data.
         let start = DateTime::parse_from_rfc3339(&session.start_date)
             .map(|date| date.with_timezone(&Utc))
             .unwrap_or(now);
@@ -488,6 +600,7 @@ pub fn current_streak(sessions: &[StudySession], now: DateTime<Utc>) -> i64 {
             day += Duration::days(1);
         }
     }
+    // Keep yesterday visible when the current day has not started a session.
     let mut cursor = now.date_naive();
     if !days.contains(&cursor) {
         cursor -= Duration::days(1);
@@ -501,6 +614,7 @@ pub fn current_streak(sessions: &[StudySession], now: DateTime<Utc>) -> i64 {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Home snapshot assembled from local tasks, SRS, exams, and sessions.
 pub struct TodaySnapshot {
     pub date: String,
     pub open_task_count: usize,
@@ -522,9 +636,14 @@ pub fn today_snapshot(
     investment_seconds: i64,
     _phases: &[StudyPhase],
 ) -> TodaySnapshot {
+    // `now` is injected to keep the snapshot deterministic in tests and to
+    // make all date comparisons use one UTC reference instant.
     let today = now.date_naive();
+    // Task counts are intentionally global to the Workspace; phase filtering is
+    // a caller concern and `_phases` is retained for API compatibility.
     let open_task_count = tasks.iter().filter(|task| !task.is_completed).count();
     let completed_task_count = tasks.iter().filter(|task| task.is_completed).count();
+    // Count sessions by their start date, matching the timer's user-facing day.
     let study_minutes = sessions
         .iter()
         .filter(|session| session.completed)
@@ -535,6 +654,8 @@ pub fn today_snapshot(
                 .map(|_| session.duration_seconds / 60)
         })
         .sum::<i64>();
+    // The home window includes exams from yesterday through the next 30 days,
+    // matching the UI's near-term planning horizon.
     let upcoming_exams = exams
         .iter()
         .filter(|exam| {
@@ -549,6 +670,8 @@ pub fn today_snapshot(
         .cloned()
         .collect();
     let due_mistake_count = due_mistakes(mistakes, now).len();
+    // Suggestions are intentionally short, deterministic strings; localization
+    // and presentation remain responsibilities of the caller.
     let mut suggestions = Vec::new();
     if due_mistake_count > 0 {
         suggestions.push(format!("Review {due_mistake_count} due mistakes."));
@@ -646,6 +769,7 @@ mod tests {
     }
 
     #[test]
+    // Verify the shared 1/3/4/5 quality mapping and the reset/growth branches.
     fn srs_again_resets_and_good_grows_interval() {
         let now = DateTime::parse_from_rfc3339("2026-07-31T00:00:00Z")
             .unwrap()
@@ -660,6 +784,7 @@ mod tests {
     }
 
     #[test]
+    // Sessions on today and yesterday form a two-day streak from one UTC now.
     fn streak_counts_today_and_previous_days() {
         let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
@@ -696,6 +821,8 @@ mod tests {
     }
 
     #[test]
+    // Same-day diaries are averaged, while minutes/reviews/grades use their
+    // documented activity weights.
     fn trends_average_same_day_diaries_and_apply_activity_weights() {
         let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
@@ -724,6 +851,8 @@ mod tests {
     }
 
     #[test]
+    // Subject direction, attention, and SRS counts stay scoped to the range and
+    // subject key rather than leaking across records.
     fn trends_subject_direction_and_srs_counts_are_scoped() {
         let now = DateTime::parse_from_rfc3339("2026-07-31T12:00:00Z")
             .unwrap()
@@ -755,6 +884,8 @@ mod tests {
     }
 
     #[test]
+    // Model validation remains the write-side guard for invalid diary scores and
+    // timestamps even though read-only analytics is tolerant.
     fn diary_validation_rejects_invalid_score_and_date() {
         let invalid_score = diary("2026-07-31T00:00:00Z", 6, 3);
         assert!(invalid_score.validate().is_err());

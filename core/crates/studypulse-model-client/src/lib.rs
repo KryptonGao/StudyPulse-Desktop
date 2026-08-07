@@ -11,6 +11,20 @@ pub const DEFAULT_CLOUD_AUTH_BASE_URL: &str = "https://auth.chenkai.space";
 pub const DEFAULT_OPENAI_COMPATIBLE_BASE_URL: &str = "https://api.openai.com/v1";
 const MAX_CLOUD_MESSAGE_CHARACTERS: usize = 32_768;
 
+// This crate normalizes several provider protocols into one host-owned model
+// contract.  The Agent sends structured messages and tool schemas here; the
+// provider may stream text or return tool-call JSON, but it never executes a
+// tool and never decides how credentials or errors are exposed to the UI.
+//
+// Cloud AI and OpenAI-compatible BYOK intentionally share the streaming and
+// error-normalization helpers while retaining their distinct authentication and
+// request shapes.
+
+// The public records in this file are intentionally provider-neutral.  They
+// are the seam shared by the Agent loop, Tauri commands, and future clients;
+// provider-specific envelopes are kept below the client implementations so a
+// new endpoint does not require changing the host-facing conversation model.
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelToolDefinition {
@@ -25,6 +39,9 @@ pub struct ModelToolDefinition {
     pub permission: Option<String>,
 }
 
+// Tool calls are provider-neutral before they reach the Agent runtime.  The
+// arguments remain JSON because each registered tool owns its own strict schema
+// and the host performs the authoritative validation after this layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelToolCall {
@@ -49,6 +66,13 @@ pub enum ChatMessage {
     },
 }
 
+// Tool messages are emitted by the host after execution, never accepted as
+// arbitrary caller input.  That distinction lets a provider continue a loop
+// from an authoritative result instead of manufacturing its own tool output.
+
+// `ChatMessage` is a tagged wire enum.  Keeping the role tag and camelCase
+// request fields stable lets Rust, Tauri, and Swift share the same transcript
+// without per-provider role conversions leaking into the FFI layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRequest {
@@ -60,6 +84,9 @@ pub struct ModelRequest {
     pub stages: Vec<String>,
 }
 
+// A response can contain both streamed text snapshots and tool calls.  The
+// runtime emits callbacks during transport, then uses this final object to
+// recover any suffix not already sent and to continue the tool loop.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelResponse {
@@ -67,8 +94,15 @@ pub struct ModelResponse {
     pub tool_calls: Vec<ModelToolCall>,
 }
 
+// `text_deltas` is a final normalized snapshot, not necessarily a one-to-one
+// copy of transport chunks.  The Agent compares it with callback text to avoid
+// displaying the same streamed answer twice.
+
 pub type ModelTextDeltaHandler = Arc<dyn Fn(String) + Send + Sync>;
 
+// Cloud tokens and profiles stay in Rust-owned state and are converted to
+// redacted DTOs by the outer facade.  These structs therefore carry values for
+// provider calls but are not serialized as part of a model request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudAuthTokens {
     pub access_token: String,
@@ -97,6 +131,9 @@ pub struct ByokConfig {
     pub model: String,
 }
 
+// Errors form the stable classification boundary used by Agent and UI code.
+// Keep authentication, quota, access, payload, response, and transport cases
+// distinct so callers can choose recovery actions without parsing strings.
 #[derive(Debug, Error)]
 pub enum ModelError {
     #[error("Cloud AI is not configured")]
@@ -123,6 +160,9 @@ pub enum ModelError {
 
 #[async_trait]
 pub trait ModelClient: Send + Sync {
+    // Implementations must invoke the callback with incremental user-visible
+    // text when streaming is available, then return the normalized response.
+    // Tool-call JSON is deliberately excluded from the text callback.
     async fn complete(
         &self,
         request: ModelRequest,
@@ -130,11 +170,18 @@ pub trait ModelClient: Send + Sync {
     ) -> Result<ModelResponse, ModelError>;
 }
 
+// The mock is deliberately protocol-shaped rather than a shortcut that calls
+// Workspace itself.  It proposes the same read/read/write sequence as a model,
+// leaving permission prompts and side-effect assertions to the real runtime.
+
 #[derive(Debug, Default)]
 pub struct MockModelClient;
 
 #[async_trait]
 impl ModelClient for MockModelClient {
+    // The mock progresses through the same list/read/write sequence as a real
+    // Agent run.  It is deterministic and network-free, making consent and
+    // cursor tests exercise the runtime rather than a provider.
     async fn complete(
         &self,
         request: ModelRequest,
@@ -194,7 +241,17 @@ pub struct OpenAICompatibleModelClient {
     model: String,
 }
 
+// Cloud and BYOK clients share transport helpers but keep credentials in
+// separate structs.  This prevents a status/configuration call from confusing
+// a Cloud session token with a user-provided API key.
+
 impl CloudModelClient {
+    // Cloud construction does not perform a network request.  Keeping setup
+    // local makes login/profile/refresh explicit operations and allows the
+    // caller to surface configuration errors before starting Agent work.
+    // Construction validates only local configuration and normalizes the base
+    // URL.  Token validity is established by the auth flow or a later request,
+    // while the token itself never enters a serialized DTO.
     pub fn new(
         api_base_url: &str,
         access_token: String,
@@ -212,6 +269,9 @@ impl CloudModelClient {
     }
 
     pub fn login_url(callback_url: &str) -> Result<String, ModelError> {
+        // The deep-link callback is validated before it is embedded in the
+        // login URL, preventing an arbitrary redirect from entering the auth
+        // handshake.
         validate_callback_base(callback_url)?;
         let mut url = normalize_base_url(DEFAULT_CLOUD_AUTH_BASE_URL)?
             .join("login")
@@ -221,6 +281,9 @@ impl CloudModelClient {
     }
 
     pub fn parse_auth_callback(callback_url: &str) -> Result<CloudAuthTokens, ModelError> {
+        // Accept only the registered studypulse://auth/callback shape and the
+        // provider-specific token prefixes.  Auth rejection is kept separate
+        // from malformed callbacks so UI can offer the right recovery action.
         let url = Url::parse(callback_url).map_err(|_| ModelError::InvalidAuthCallback)?;
         if url.scheme() != "studypulse"
             || url.host_str() != Some("auth")
@@ -254,6 +317,12 @@ impl CloudModelClient {
     }
 
     pub async fn profile(&self) -> Result<CloudProfile, ModelError> {
+        // Profile responses are status data, not authorization data.  The
+        // access token is used only by the request client and never copied into
+        // the returned CloudProfile or any facade DTO.
+        // Profile data is a capability/status view, not a credential store.  A
+        // successful HTTP response still requires a valid provider envelope and
+        // falls back only for optional membership/plan fields.
         let url = self
             .api_base_url
             .join("user/profile")
@@ -306,6 +375,12 @@ impl CloudModelClient {
         api_base_url: &str,
         refresh_token: &str,
     ) -> Result<CloudAuthTokens, ModelError> {
+        // Refresh accepts known server envelope variants for compatibility, but
+        // the prefix checks below remain strict so an arbitrary response value
+        // cannot be promoted into a usable session token.
+        // The refresh endpoint has appeared with several compatible envelope
+        // shapes; accept the known token field variants but require the same
+        // access/refresh prefixes before returning them to the host.
         if !refresh_token.starts_with("sp_refresh_") {
             return Err(ModelError::SessionExpired);
         }
@@ -345,6 +420,11 @@ impl CloudModelClient {
     }
 
     pub async fn logout(&self) -> Result<(), ModelError> {
+        // Logout treats an already-invalid session as complete, making the UI
+        // idempotent after remote revocation instead of trapping the account in
+        // a signed-in state because the provider returned 401.
+        // Logout is idempotent for an already-expired session.  Treating 401 as
+        // success avoids trapping the user in a signed-in UI after revocation.
         let url = self
             .api_base_url
             .join("v1/auth/logout")
@@ -369,6 +449,12 @@ impl CloudModelClient {
         message: String,
         on_text_delta: &ModelTextDeltaHandler,
     ) -> Result<String, ModelError> {
+        // Cloud's stream is parsed as a text transport and normalized into the
+        // same final/tool protocol used by BYOK.  Provider-specific event names
+        // stop at this method boundary.
+        // Cloud uses a compact `{message, stream}` envelope.  The response may
+        // be JSON fallback or SSE; both paths end at StreamingAgentReply so the
+        // Agent sees one final text representation.
         if message.chars().count() > MAX_CLOUD_MESSAGE_CHARACTERS {
             return Err(ModelError::RequestTooLarge);
         }
@@ -430,6 +516,12 @@ impl CloudModelClient {
 }
 
 impl OpenAICompatibleModelClient {
+    // BYOK construction normalizes only endpoint metadata.  The key stays in
+    // the client instance and is used for authorization/redaction, never for
+    // status projection or prompt content.
+    // BYOK requires a non-empty key and model, then stores a normalized base URL
+    // for later `/chat/completions` resolution.  The key remains private to the
+    // client and is redacted if a provider echoes it in an error body.
     pub fn new(api_base_url: &str, api_key: String, model: String) -> Result<Self, ModelError> {
         if api_key.trim().is_empty() {
             return Err(ModelError::NotConfigured);
@@ -447,6 +539,8 @@ impl OpenAICompatibleModelClient {
     }
 
     pub fn config(&self) -> ByokConfig {
+        // Expose only reconnectable non-secret settings.  The API key is never
+        // returned through this status/configuration view.
         ByokConfig {
             base_url: self.api_base_url.to_string().trim_end_matches('/').into(),
             model: self.model.clone(),
@@ -458,6 +552,13 @@ impl OpenAICompatibleModelClient {
         request: &ModelRequest,
         on_text_delta: &ModelTextDeltaHandler,
     ) -> Result<ModelResponse, ModelError> {
+        // The native OpenAI shape is assembled here so the generic prompt
+        // builder remains provider-neutral.  Streaming and non-streaming paths
+        // converge on the same ModelResponse parser below.
+        // OpenAI-compatible providers receive a conventional chat-completions
+        // request, including native function schemas when tools are available.
+        // The streaming parser below accumulates content and tool-call fragments
+        // independently because providers may interleave both kinds of delta.
         let prompt = build_agent_prompt(request)?;
         let url = self
             .api_base_url
@@ -532,6 +633,9 @@ impl OpenAICompatibleModelClient {
 
 #[async_trait]
 impl ModelClient for OpenAICompatibleModelClient {
+    // The trait method is intentionally thin: request shaping, transport
+    // parsing, and provider-specific error mapping remain inside the client so
+    // Agent only handles the normalized ModelResponse contract.
     async fn complete(
         &self,
         request: ModelRequest,
@@ -543,6 +647,9 @@ impl ModelClient for OpenAICompatibleModelClient {
 
 #[async_trait]
 impl ModelClient for CloudModelClient {
+    // Cloud's text envelope is converted into the same final/tool response
+    // shape as BYOK.  This keeps provider choice independent from Agent loop
+    // behavior and confirmation handling.
     async fn complete(
         &self,
         request: ModelRequest,
@@ -555,6 +662,11 @@ impl ModelClient for CloudModelClient {
 }
 
 fn cloud_http_client() -> Result<Client, ModelError> {
+    // Timeouts are part of the model contract: a provider that stops sending
+    // bytes must eventually return control to Agent cancellation and UI state.
+    // Shared client limits bound connection setup and response wait time.  The
+    // user agent is stable for server diagnostics without including account or
+    // credential data.
     Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(90))
@@ -564,6 +676,12 @@ fn cloud_http_client() -> Result<Client, ModelError> {
 }
 
 fn normalize_base_url(raw: &str) -> Result<Url, ModelError> {
+    // URL normalization is a security boundary as well as convenience.  The
+    // returned trailing slash makes join semantics stable, while rejecting
+    // userinfo/query/fragment prevents credentials or hidden paths from leaking.
+    // Provider URLs may be HTTPS or local HTTP only.  Userinfo, query, and
+    // fragment components are rejected so path joining cannot reinterpret a
+    // credential-bearing or ambiguous base URL.
     let raw = raw.trim().trim_end_matches('/');
     let url = Url::parse(raw).map_err(|error| ModelError::InvalidUrl(error.to_string()))?;
     if !matches!(url.scheme(), "https" | "http")
@@ -586,6 +704,9 @@ fn normalize_base_url(raw: &str) -> Result<Url, ModelError> {
 }
 
 fn validate_callback_base(callback_url: &str) -> Result<(), ModelError> {
+    // Deep-link callbacks are fixed protocol coordinates, not arbitrary URLs.
+    // Query and fragment rejection ensures login starts from a clean callback
+    // base and tokens are accepted only from the returned query parameters.
     let url = Url::parse(callback_url).map_err(|_| ModelError::InvalidAuthCallback)?;
     if url.scheme() == "studypulse"
         && url.host_str() == Some("auth")
@@ -600,6 +721,13 @@ fn validate_callback_base(callback_url: &str) -> Result<(), ModelError> {
 }
 
 fn build_agent_prompt(request: &ModelRequest) -> Result<String, ModelError> {
+    // The textual prompt is the common denominator for Cloud and BYOK.  It
+    // includes schemas and transcript as data, but explicitly tells the model
+    // that only the host can validate or execute the proposed operations.
+    // Cloud and BYOK receive a textual envelope because their provider APIs do
+    // not share a native transcript shape here.  The prompt explicitly states
+    // that the host owns validation/execution, preserving the security boundary
+    // even when a model is capable of emitting arbitrary JSON.
     let tools = serde_json::to_string(&request.tools).map_err(|_| ModelError::InvalidResponse)?;
     let messages =
         serde_json::to_string(&request.messages).map_err(|_| ModelError::InvalidResponse)?;
@@ -642,12 +770,22 @@ Authoritative conversation and tool-result transcript:
         }
     );
     if prompt.chars().count() > MAX_CLOUD_MESSAGE_CHARACTERS {
+        // Reject before network I/O so an oversized transcript cannot consume
+        // provider quota or create an unbounded request body.
         return Err(ModelError::RequestTooLarge);
     }
     Ok(prompt)
 }
 
 fn parse_agent_reply(reply: &str) -> ModelResponse {
+    // Reply parsing is intentionally ordered from most specific to most
+    // permissive.  A valid native envelope wins; compatibility extraction is
+    // attempted only when a provider added harmless prose or a code fence.
+    // Plain text is the final fallback and never becomes an executable call.
+    // Providers sometimes wrap JSON in Markdown fences or explanatory text.
+    // Try strict JSON, then the innermost object, then XML calls, and finally
+    // expose plain text; tool-call syntax is never shown as an assistant answer
+    // when a known call shape can be recovered.
     let trimmed = reply.trim();
     let candidate = trimmed
         .strip_prefix("```json")
@@ -686,6 +824,8 @@ fn parse_agent_reply(reply: &str) -> ModelResponse {
 }
 
 fn parse_json_candidate(candidate: &str) -> Option<Value> {
+    // Smart-quote normalization is a compatibility fallback for weaker models;
+    // the primary path remains strict serde JSON so valid payloads are unchanged.
     serde_json::from_str::<Value>(candidate).ok().or_else(|| {
         normalize_smart_json(candidate)
             .and_then(|normalized| serde_json::from_str::<Value>(&normalized).ok())
@@ -693,6 +833,12 @@ fn parse_json_candidate(candidate: &str) -> Option<Value> {
 }
 
 fn normalize_smart_json(input: &str) -> Option<String> {
+    // This normalizer is a repair layer, not a second general-purpose parser.
+    // It tracks only whether it is inside a typographic string and preserves
+    // ordinary ASCII JSON untouched, limiting the chance of changing content.
+    // Normalize typographic quotes and control characters only inside the
+    // candidate string.  Returning None for an unterminated smart-quoted value
+    // avoids turning an incomplete stream into a false tool call.
     let mut normalized = String::with_capacity(input.len());
     let mut in_smart_string = false;
     let mut characters = input.chars();
@@ -740,6 +886,12 @@ fn normalize_smart_json(input: &str) -> Option<String> {
 /// currently transports one text message, so this compatibility layer is the
 /// equivalent of OpenCode's provider normalization boundary.
 fn parse_tool_calls_value(value: &Value) -> Option<ModelResponse> {
+    // Several providers use different nesting for function calls.  They are
+    // accepted here because all candidates still pass through one decoder and
+    // one call-id/name/arguments normalization path before reaching Agent.
+    // Accept the native StudyPulse `calls` envelope and common `tool_calls`,
+    // single-function, and array shapes.  All candidates converge through
+    // decode_agent_call so name/argument defaults are applied consistently.
     let candidates = match value {
         Value::Array(values) => values.clone(),
         Value::Object(object) => {
@@ -766,6 +918,12 @@ fn parse_tool_calls_value(value: &Value) -> Option<ModelResponse> {
 }
 
 fn decode_agent_call(value: &Value) -> Option<AgentCall> {
+    // The canonical serde decode is attempted first so the StudyPulse wire
+    // shape remains the preferred contract.  Nested OpenAI-style functions are
+    // only a compatibility fallback and cannot bypass the later tool schema.
+    // The first decode preserves the canonical envelope.  The fallback handles
+    // OpenAI-style nested function objects and stringified arguments without
+    // assuming the provider supplied a call id.
     if let Ok(call) = serde_json::from_value::<AgentCall>(value.clone())
         && !call.name.trim().is_empty()
     {
@@ -801,6 +959,12 @@ fn decode_agent_call(value: &Value) -> Option<AgentCall> {
 }
 
 fn model_response_from_calls(calls: Vec<AgentCall>) -> Option<ModelResponse> {
+    // This function is the executable boundary for parsed calls: empty names
+    // are discarded and missing ids are filled locally so every Tool message
+    // can be paired deterministically with the model request that produced it.
+    // Missing ids are filled locally because the Agent tool-message protocol
+    // requires a stable call id for the response that is sent back to the model.
+    // Empty names are discarded rather than becoming executable unknown tools.
     let tool_calls = calls
         .into_iter()
         .filter(|call| !call.name.trim().is_empty())
@@ -820,6 +984,12 @@ fn model_response_from_calls(calls: Vec<AgentCall>) -> Option<ModelResponse> {
 }
 
 fn parse_xml_tool_calls(input: &str) -> Option<ModelResponse> {
+    // XML support is intentionally narrow.  Only JSON bodies inside explicit
+    // tool-call tags are decoded, so arbitrary XML is never treated as a model
+    // action or copied into the normalized call list.
+    // XML is accepted only as a narrow compatibility shape used by some local
+    // providers; the body must still contain JSON that passes normal call
+    // decoding before it can reach the host.
     let mut remaining = input;
     let mut calls = Vec::new();
     while let Some(start) = remaining.find("<tool_call>") {
@@ -844,6 +1014,13 @@ struct StreamingAgentReply {
 }
 
 impl StreamingAgentReply {
+    // Cloud can stream a JSON object one character range at a time.  Keeping a
+    // raw buffer lets the scanner distinguish a partial final text field from
+    // a tool-call object, while `emitted_text` records the already delivered
+    // prefix for suffix-only callbacks.
+    // The raw buffer is retained because Cloud streams partial JSON envelopes.
+    // Only a completed `type: final` payload is safe to expose; emitted_text
+    // makes callback delivery incremental without leaking tool-call JSON.
     fn push(&mut self, delta: &str, on_text_delta: &ModelTextDeltaHandler) {
         self.raw.push_str(delta);
         let Some(text) = partial_final_text(&self.raw) else {
@@ -859,6 +1036,8 @@ impl StreamingAgentReply {
     }
 
     fn finish(self) -> Result<String, ModelError> {
+        // An empty stream is a protocol failure rather than an empty answer, so
+        // callers can surface an invalid provider response distinctly.
         (!self.raw.trim().is_empty())
             .then_some(self.raw)
             .ok_or(ModelError::InvalidResponse)
@@ -871,6 +1050,9 @@ struct OpenAIStreamingReply {
     tool_calls: BTreeMap<usize, OpenAIToolCallAccumulator>,
 }
 
+// OpenAI-compatible tool calls arrive as fragments keyed by `index`.  Keeping
+// a separate accumulator for each index allows content and multiple calls to
+// be interleaved without changing their eventual order.
 #[derive(Default)]
 struct OpenAIToolCallAccumulator {
     id: String,
@@ -879,6 +1061,12 @@ struct OpenAIToolCallAccumulator {
 }
 
 impl OpenAIStreamingReply {
+    // OpenAI-compatible streams carry independent content and tool-call
+    // fragments.  The accumulator keeps them separate until the provider sends
+    // a terminal marker, then converges both paths into ModelResponse.
+    // Prefer accumulated native tool calls when present; otherwise finish the
+    // content stream through the Cloud-compatible envelope parser.  This is the
+    // single convergence point for streaming and non-streaming semantics.
     fn finish(self) -> Result<ModelResponse, ModelError> {
         if !self.tool_calls.is_empty() {
             let calls = self
@@ -907,6 +1095,8 @@ impl OpenAIStreamingReply {
 }
 
 fn sse_event_boundary(bytes: &[u8]) -> Option<(usize, usize)> {
+    // Both LF and CRLF separators are common in SSE implementations.  Returning
+    // the separator length lets the caller drain exactly one complete event.
     bytes
         .windows(2)
         .position(|window| window == b"\n\n")
@@ -924,6 +1114,12 @@ fn consume_sse_event(
     reply: &mut StreamingAgentReply,
     on_text_delta: &ModelTextDeltaHandler,
 ) -> Result<bool, ModelError> {
+    // SSE framing is transport syntax, not model content.  This parser removes
+    // `data:` prefixes and terminal markers before the JSON response reaches
+    // the provider-normalization layer.
+    // Cloud SSE carries one or more `data:` lines per event.  Empty events are
+    // ignored, `[DONE]` ends the stream, and only recognized final text reaches
+    // the UI callback through StreamingAgentReply.
     let event = std::str::from_utf8(event).map_err(|_| ModelError::InvalidResponse)?;
     let data = event
         .lines()
@@ -956,6 +1152,12 @@ fn consume_openai_sse_event(
     reply: &mut OpenAIStreamingReply,
     on_text_delta: &ModelTextDeltaHandler,
 ) -> Result<bool, ModelError> {
+    // Tool-call fragments are merged by provider-supplied index.  The index is
+    // the only stable ordering signal when name and arguments arrive in
+    // different chunks, so callers must not append fragments by arrival alone.
+    // The OpenAI-compatible parser handles provider errors, content deltas, and
+    // native tool-call fragments in one event.  Index-based accumulation is
+    // necessary because id/name/arguments may arrive in different chunks.
     let event = std::str::from_utf8(event).map_err(|_| ModelError::InvalidResponse)?;
     let data = event
         .lines()
@@ -1012,6 +1214,11 @@ fn consume_openai_sse_event(
 }
 
 fn parse_openai_completion(bytes: &[u8]) -> Result<ModelResponse, ModelError> {
+    // Non-streaming responses use the same call decoder as SSE fragments.  This
+    // keeps provider choice from changing whether a tool call is executable.
+    // Non-streaming OpenAI responses use the same native tool-call shape.  A
+    // plain message is normalized through parse_agent_reply so final envelopes
+    // and provider-specific plain text remain compatible.
     let value: Value = serde_json::from_slice(bytes).map_err(|_| ModelError::InvalidResponse)?;
     if value.get("error").is_some() {
         let message = decode_error_message(bytes)
@@ -1042,6 +1249,12 @@ fn parse_openai_completion(bytes: &[u8]) -> Result<ModelResponse, ModelError> {
 }
 
 fn partial_final_text(input: &str) -> Option<String> {
+    // Incremental display must wait until the type field says `final`.  This
+    // small rule is what keeps a partial `tool_calls` object from flashing as
+    // assistant prose while the provider is still transmitting it.
+    // Streaming text is exposed only after the response type is fully known to
+    // be `final`.  This prevents a partial tool-call object from appearing as
+    // chat text while it is still being assembled.
     let (response_type, type_complete) = find_json_string_field(input, "type")?;
     if !type_complete || response_type != "final" {
         return None;
@@ -1050,6 +1263,12 @@ fn partial_final_text(input: &str) -> Option<String> {
 }
 
 fn find_json_string_field(input: &str, field: &str) -> Option<(String, bool)> {
+    // The scanner deliberately understands only string fields and escapes.  A
+    // full document parse would reject the incomplete prefixes that are normal
+    // during SSE, while a broad permissive parser could expose malformed data.
+    // This small scanner intentionally tolerates an incomplete closing quote:
+    // callers use the boolean to distinguish a complete field from a prefix
+    // that should wait for another SSE delta.
     let bytes = input.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -1088,6 +1307,13 @@ struct DecodedJsonString {
 }
 
 fn decode_json_string(input: &str, opening_quote: usize) -> Option<DecodedJsonString> {
+    // Returning `end: None` for an unfinished quote is useful information, not
+    // an error: the streaming caller can retain the decoded prefix and wait for
+    // the next chunk without losing already received Unicode text.
+    // The scanner covers the JSON escapes needed while a provider response is
+    // still incomplete.  It does not attempt to parse an entire document, which
+    // keeps incremental text delivery independent from serde's all-or-nothing
+    // document parser.
     let bytes = input.as_bytes();
     if bytes.get(opening_quote) != Some(&b'"') {
         return None;
@@ -1136,6 +1362,9 @@ fn decode_json_string(input: &str, opening_quote: usize) -> Option<DecodedJsonSt
 }
 
 fn decode_unicode_escape(bytes: &[u8], u_index: usize) -> Option<(char, usize)> {
+    // Decode BMP escapes and surrogate pairs without accepting an invalid scalar
+    // value.  Provider text is thus reconstructed as valid Rust characters even
+    // when the escape crosses an SSE chunk boundary.
     let high = decode_hex_quad(bytes.get(u_index + 1..u_index + 5)?)?;
     let next = u_index + 5;
     if !(0xD800..=0xDBFF).contains(&high) {
@@ -1153,6 +1382,8 @@ fn decode_unicode_escape(bytes: &[u8], u_index: usize) -> Option<(char, usize)> 
 }
 
 fn decode_hex_quad(bytes: &[u8]) -> Option<u16> {
+    // Keep hexadecimal parsing narrow and allocation-free for the incremental
+    // scanner; callers decide whether the resulting code unit is a valid scalar.
     (bytes.len() == 4).then_some(())?;
     bytes.iter().try_fold(0_u16, |value, byte| {
         let digit = (*byte as char).to_digit(16)?;
@@ -1161,10 +1392,18 @@ fn decode_hex_quad(bytes: &[u8]) -> Option<u16> {
 }
 
 fn request_error(error: reqwest::Error) -> ModelError {
+    // Transport failures deliberately remain a generic request category; the
+    // provider-specific status mapping below handles semantic HTTP failures.
     ModelError::Request(error.to_string())
 }
 
 fn map_cloud_error(status: StatusCode, body: &[u8]) -> ModelError {
+    // HTTP status is mapped before any provider message is shown.  The category
+    // gives the UI a recovery action, while the bounded decoded message adds
+    // context without exposing raw response bodies or credentials.
+    // Cloud status codes map to user-actionable categories while preserving a
+    // bounded provider message.  Unauthorized means refresh/login, not a bad
+    // request, so it remains distinguishable from generic transport failure.
     let message = decode_error_message(body).unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
     match status {
         StatusCode::UNAUTHORIZED => ModelError::SessionExpired,
@@ -1176,6 +1415,12 @@ fn map_cloud_error(status: StatusCode, body: &[u8]) -> ModelError {
 }
 
 fn map_openai_error(status: StatusCode, body: &[u8], api_key: &str) -> ModelError {
+    // BYOK errors receive an extra redaction pass because third-party gateways
+    // occasionally echo authorization material in their JSON error payload.
+    // The sanitized message is the only value allowed to cross this boundary.
+    // BYOK providers are less uniform, so status mapping is shared but the
+    // message is sanitized against the configured secret before it leaves this
+    // crate.  No error path should echo the API key into UI or logs.
     let message = decode_error_message(body).unwrap_or_else(|| {
         format!(
             "OpenAI-compatible provider returned HTTP {}",
@@ -1199,6 +1444,8 @@ fn map_openai_error(status: StatusCode, body: &[u8], api_key: &str) -> ModelErro
 }
 
 fn decode_error_message(body: &[u8]) -> Option<String> {
+    // Support string and object error envelopes, preferring a human message and
+    // falling back to a provider code when no message exists.
     let value: Value = serde_json::from_slice(body).ok()?;
     match value.get("error")? {
         Value::String(message) => Some(message.clone()),
@@ -1212,6 +1459,8 @@ fn decode_error_message(body: &[u8]) -> Option<String> {
 }
 
 fn tool_call(name: &str, arguments: Value) -> ModelResponse {
+    // The mock and tests use the same response constructor as a normalized
+    // provider call, including a locally generated id for tool-message pairing.
     ModelResponse {
         text_deltas: Vec::new(),
         tool_calls: vec![ModelToolCall {
@@ -1228,6 +1477,9 @@ struct ProfileEnvelope {
     data: Option<ProfileData>,
 }
 
+// Cloud response envelopes intentionally use optional fields because server
+// versions have added membership and plan data independently.  Required
+// authentication tokens are validated after deserialization, not assumed here.
 #[derive(Debug, Deserialize)]
 struct ProfileData {
     email: Option<String>,
@@ -1281,6 +1533,9 @@ enum AgentEnvelope {
     Final { text: String },
 }
 
+// AgentCall is the internal compatibility shape before conversion to the public
+// ModelToolCall.  An absent id is allowed at this stage and filled at the
+// normalization boundary so legacy providers remain usable.
 #[derive(Debug, Deserialize)]
 struct AgentCall {
     id: Option<String>,
@@ -1289,12 +1544,25 @@ struct AgentCall {
     arguments: Value,
 }
 
+// These envelope structs intentionally mirror only fields consumed by the
+// client.  Unknown server additions remain harmless, while required token
+// prefixes and response presence are checked explicitly after decoding.
+
 fn empty_arguments() -> Value {
+    // Serde uses this default for providers that omit an arguments member; the
+    // tool registry still applies the target tool's strict schema afterward.
     json!({})
 }
 
+// Provider tests stay network-free and focus on normalization: callback URL
+// validation, token prefixes, redaction, framing, and compatibility envelopes.
+// Transport integration belongs to the caller's environment, while these
+// deterministic cases protect the protocol boundary on every platform.
 #[cfg(test)]
 mod tests {
+    // Tests cover wire compatibility, incremental filtering, auth validation,
+    // HTTP error classification, and native OpenAI tool-call accumulation.  The
+    // fixtures intentionally avoid real credentials and external network calls.
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -1307,6 +1575,8 @@ mod tests {
 
     #[test]
     fn login_url_encodes_the_registered_callback() {
+        // Auth URL generation must preserve the exact deep-link callback so a
+        // successful login returns to the desktop instead of another target.
         let url = CloudModelClient::login_url("studypulse://auth/callback").unwrap();
         let parsed = Url::parse(&url).unwrap();
         assert_eq!(parsed.host_str(), Some("auth.chenkai.space"));
@@ -1321,6 +1591,8 @@ mod tests {
 
     #[test]
     fn auth_callback_requires_both_expected_token_types() {
+        // Both token prefixes are required before the host can establish a
+        // session; malformed values never become CloudAuthTokens.
         let tokens = CloudModelClient::parse_auth_callback(
             "studypulse://auth/callback?access_token=sp_sess_abc&refresh_token=sp_refresh_xyz",
         )
@@ -1337,6 +1609,8 @@ mod tests {
 
     #[test]
     fn tool_envelope_is_converted_to_model_calls() {
+        // The canonical Agent envelope is normalized before the runtime sees it,
+        // keeping provider JSON separate from ToolRegistry execution.
         let response = parse_agent_reply(
             r#"{"type":"tool_calls","calls":[{"name":"get_tasks","arguments":{}}]}"#,
         );
@@ -1348,6 +1622,8 @@ mod tests {
 
     #[test]
     fn common_provider_tool_call_shapes_are_normalized() {
+        // OpenAI-style nested functions and single-call shapes converge on the
+        // same ModelToolCall representation.
         let openai = parse_agent_reply(
             r#"{"tool_calls":[{"id":"call-1","function":{"name":"code_execution","arguments":"{\"language\":\"python\",\"code\":\"print(2 + 2)\"}"}}]}"#,
         );
@@ -1361,6 +1637,8 @@ mod tests {
 
     #[test]
     fn smart_quoted_tool_envelopes_are_normalized_without_exposing_them_as_text() {
+        // Smart quotes are a compatibility fallback, but a recovered call must
+        // remain a call rather than leaking its JSON into assistant text.
         let response = parse_agent_reply(
             r#"{“type”:“tool_calls”,“calls”:[{“id”:“call-smart”,“name”:“code_execution”,“arguments”:{“language”:“python”,“code”:“print(\"ok\")\n”}}]}"#,
         );
@@ -1373,6 +1651,8 @@ mod tests {
 
     #[test]
     fn final_and_plain_responses_are_presented_as_text() {
+        // Final envelopes become text deltas; an unrecognized provider reply is
+        // still preserved as plain text rather than discarded.
         assert_eq!(
             parse_agent_reply(r#"{"type":"final","text":"Ready"}"#).text_deltas,
             vec!["Ready"]
@@ -1385,6 +1665,8 @@ mod tests {
 
     #[test]
     fn final_markdown_is_emitted_incrementally_without_the_json_envelope() {
+        // Streaming callbacks expose only final text after its type is known,
+        // proving the UI never renders partial protocol JSON.
         let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let received_by_handler = Arc::clone(&received);
         let handler: ModelTextDeltaHandler = Arc::new(move |delta| {
@@ -1407,6 +1689,8 @@ mod tests {
 
     #[test]
     fn tool_call_json_is_not_exposed_as_streamed_chat_text() {
+        // Tool-call streams are intentionally silent on the text callback; the
+        // completed response carries the call for host-side execution.
         let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let received_by_handler = Arc::clone(&received);
         let handler: ModelTextDeltaHandler = Arc::new(move |delta| {
@@ -1424,6 +1708,8 @@ mod tests {
 
     #[test]
     fn cloud_errors_support_both_error_envelopes() {
+        // Error classification accepts string and object provider bodies,
+        // preserving actionable categories without one server shape.
         assert_eq!(
             decode_error_message(br#"{"error":"Daily request limit exceeded"}"#).as_deref(),
             Some("Daily request limit exceeded")
@@ -1439,12 +1725,16 @@ mod tests {
 
     #[test]
     fn insecure_non_local_base_url_is_rejected() {
+        // Plain HTTP is allowed only for loopback development endpoints; remote
+        // providers must use HTTPS before credentials are sent.
         assert!(normalize_base_url("http://spapi.chenkai.space").is_err());
         assert!(normalize_base_url("http://127.0.0.1:8787").is_ok());
     }
 
     #[tokio::test]
     async fn cloud_profile_uses_bearer_auth_and_plan_models() {
+        // Profile requests prove bearer placement and optional plan/model
+        // decoding without exposing the token in the returned profile.
         let (base_url, request) = one_shot_server(
             StatusCode::OK,
             json!({
@@ -1482,6 +1772,8 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_completion_sends_agent_context_and_decodes_tool_call() {
+        // Cloud completion includes mode/stage/history/tool context and converts
+        // the worker's tool envelope into a host call.
         let reply = json!({
             "type": "tool_calls",
             "calls": [{"id": "call-1", "name": "get_tasks", "arguments": {}}]
@@ -1523,6 +1815,8 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_completion_streams_final_markdown_deltas() {
+        // Cloud SSE callbacks are incremental final text, while the returned
+        // response retains the complete answer for the next Agent turn.
         let (base_url, _request) = one_shot_sse_server(&[
             r##"{"type":"final","text":"# Plan\n"##.into(),
             r##"- Review algebra"}"##.into(),
@@ -1557,6 +1851,8 @@ mod tests {
 
     #[tokio::test]
     async fn byok_completion_uses_openai_chat_completions_and_bearer_auth() {
+        // BYOK uses the OpenAI-compatible request path and bearer key without
+        // changing the provider-neutral ModelClient interface.
         let reply = json!({
             "choices": [{
                 "message": {
@@ -1608,6 +1904,8 @@ mod tests {
 
     #[tokio::test]
     async fn byok_completion_streams_openai_final_content() {
+        // Native OpenAI content deltas stream as text and finish as the same
+        // normalized response shape used by non-streaming calls.
         let first = "{\"type\":\"final\",\"text\":\"# Plan\\n".to_owned();
         let second = "- Review algebra\"}".to_owned();
         let (base_url, _request) = one_shot_sse_server(&[first, second]);
@@ -1643,6 +1941,8 @@ mod tests {
 
     #[test]
     fn byok_non_stream_response_decodes_native_openai_tool_calls() {
+        // Non-streaming native tool calls are decoded without requiring the
+        // textual StudyPulse envelope.
         let response = parse_openai_completion(
             br#"{
                 "choices": [{
@@ -1667,6 +1967,8 @@ mod tests {
 
     #[test]
     fn byok_streaming_response_accumulates_native_openai_tool_calls() {
+        // Fragmented id/name/argument fields are accumulated by tool-call index
+        // before the runtime receives a complete call.
         let handler: ModelTextDeltaHandler = Arc::new(|_| {});
         let mut reply = OpenAIStreamingReply::default();
         consume_openai_sse_event(
@@ -1693,10 +1995,14 @@ mod tests {
     }
 
     fn one_shot_server(status: StatusCode, body: Value) -> (String, mpsc::Receiver<String>) {
+        // Test servers capture one request and return one deterministic body,
+        // keeping transport tests local and credential-free.
         one_shot_response(status, "application/json", body.to_string())
     }
 
     fn one_shot_sse_server(deltas: &[String]) -> (String, mpsc::Receiver<String>) {
+        // SSE fixtures emit explicit event boundaries so parser tests cover
+        // chunking rather than relying on a real network stream's packet shape.
         let mut body = deltas
             .iter()
             .map(|delta| {

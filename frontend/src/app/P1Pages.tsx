@@ -4,6 +4,8 @@ import { core } from "../lib/core";
 import { useI18n } from "../i18n";
 import type { DiaryEntry, MistakeNote, TrendsSnapshot } from "../types";
 
+// Diary dates are keyed by the local calendar day for editing, then converted
+// to an ISO midnight value when crossing into the Core DTO.
 function dayKey(value = new Date()): string {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, "0");
@@ -12,10 +14,14 @@ function dayKey(value = new Date()): string {
 }
 
 function diaryDate(day: string): string {
+  // The explicit UTC suffix keeps a selected calendar day stable in storage;
+  // display helpers below use a noon UTC anchor to avoid local offset rollover.
   return `${day}T00:00:00.000Z`;
 }
 
 function displayDate(value: string, language: string): string {
+  // Formatting at noon UTC prevents a timestamp near midnight from rendering
+  // as the previous day in a user's local timezone.
   const raw = value.slice(0, 10);
   const date = new Date(`${raw}T12:00:00Z`);
   return Number.isNaN(date.valueOf())
@@ -28,6 +34,8 @@ function displayDate(value: string, language: string): string {
 }
 
 function displayShortDate(value: string, language: string): string {
+  // Charts use the same date anchor as the diary list but intentionally omit
+  // the year to keep compact axis labels readable.
   const raw = value.slice(0, 10);
   const date = new Date(`${raw}T12:00:00Z`);
   return Number.isNaN(date.valueOf())
@@ -45,6 +53,8 @@ function duration(minutes: number, t: (key: string, variables?: Record<string, s
 }
 
 function trendLevel(points: number): number {
+  // Core provides activity points; this view maps them to five visual buckets
+  // without recomputing the underlying study/review/grade formula.
   if (points <= 0) return 0;
   if (points <= 2) return 1;
   if (points <= 5) return 2;
@@ -57,6 +67,8 @@ function Section({ title, description, action }: { title: string; description?: 
 }
 
 function TrendSvg({ values, color = "var(--sage-dark)", min = 0, max }: { values: (number | null)[]; color?: string; min?: number; max?: number }) {
+  // Missing daily values are gaps, not zeroes. Coordinates are clamped to the
+  // fixed viewBox so sparse or unusually large values remain drawable.
   const resolvedMax = max ?? Math.max(min + 1, ...values.filter((value): value is number => value !== null));
   const points = values.map((value, index) => {
     if (value === null) return null;
@@ -64,6 +76,8 @@ function TrendSvg({ values, color = "var(--sage-dark)", min = 0, max }: { values
     const y = 150 - ((value - min) / Math.max(1, resolvedMax - min)) * 130;
     return `${x.toFixed(1)},${Math.max(10, Math.min(150, y)).toFixed(1)}`;
   }).filter((value): value is string => value !== null).join(" ");
+  // `role="img"` gives the non-text chart a stable accessible name; the data
+  // remains summarized in adjacent labels and stat values.
   return <svg className="p1-trend-svg" viewBox="0 0 600 170" role="img" aria-label="trend chart"><line x1="0" x2="600" y1="150" y2="150" className="chart-axis" /><polyline fill="none" stroke={color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" points={points} /></svg>;
 }
 
@@ -81,8 +95,12 @@ export function DiaryPage() {
   const trendQuery = useQuery({ queryKey: ["trends", rangeDays], queryFn: () => core.learningTrends(rangeDays) });
   const [draft, setDraft] = useState<DiaryDraft>(() => emptyDiary());
   const [editingId, setEditingId] = useState<string | null>(null);
+  // The diary list is sorted locally for stable newest-first editing, while
+  // trend data remains the Core-derived snapshot for the selected range.
   const entries = useMemo(() => [...(entriesQuery.data ?? [])].sort((a, b) => b.date.localeCompare(a.date) || b.updated_at.localeCompare(a.updated_at)), [entriesQuery.data]);
   const save = async () => {
+    // Editing preserves identity and creation metadata; a new entry gets a
+    // UUID and both mood/energy values are clamped to the five-point contract.
     if (!draft.date) {
       window.alert(t("diary.validationDate"));
       return;
@@ -102,6 +120,8 @@ export function DiaryPage() {
         updated_at: now,
         extra_json: current?.extra_json ?? "{}",
       });
+      // A diary write affects both the list and the trend projection, so both
+      // query families are refreshed after persistence succeeds.
       await queryClient.invalidateQueries({ queryKey: ["diary"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
       setEditingId(null);
@@ -111,10 +131,14 @@ export function DiaryPage() {
     }
   };
   const edit = (entry: DiaryEntry) => {
+    // The form edits only the user-facing draft fields; immutable record
+    // fields are recovered from the selected entry during save.
     setEditingId(entry.id);
     setDraft({ date: entry.date.slice(0, 10), mood_score: entry.mood_score, energy_score: entry.energy_score, energy_tag: entry.energy_tag, content: entry.content });
   };
   const remove = async (entry: DiaryEntry) => {
+    // Deletion is confirmed in the UI, then the same diary/trends invalidation
+    // keeps derived charts from displaying removed data.
     if (!window.confirm(t("diary.confirmDelete"))) return;
     try {
       await core.deleteDiaryEntry(entry.id);
@@ -168,6 +192,8 @@ export function TrendsPage() {
   if (query.isLoading) return <div className="page-content"><div className="skeleton-card" /><div className="skeleton-card short" /></div>;
   if (query.error) return <div className="page-content"><div className="panel error-card"><strong>{t("error.section")}</strong><p>{String(query.error)}</p></div></div>;
   const trend: TrendsSnapshot = query.data!;
+  // The score/ranking toggle changes presentation only; all subject trend
+  // values and thresholds are already computed by Core.
   const studyValues = trend.daily_points.map((point) => point.study_minutes);
   return <div className="page-content p1-page">
     <Section title={t("trends.title")} description={t("trends.description")} action={<div className="segmented"><button className={mode === "score" ? "active" : ""} onClick={() => setMode("score")}>{t("trends.score")}</button><button className={mode === "ranking" ? "active" : ""} onClick={() => setMode("ranking")}>{t("trends.ranking")}</button></div>} />
@@ -181,6 +207,8 @@ export function TrendsPage() {
 type ReviewQuality = 1 | 3 | 4 | 5;
 
 function sortedMistakes(values: MistakeNote[]): MistakeNote[] {
+  // Sorting is copy-on-read so React Query’s cached array is never mutated by
+  // the flashcard session; stable id ordering breaks equal-date ties.
   return values.slice().sort((left, right) => (left.review_state?.next_review_date ?? "").localeCompare(right.review_state?.next_review_date ?? "") || left.id.localeCompare(right.id));
 }
 
@@ -196,9 +224,13 @@ export function FlashcardsPage() {
   const [requeued, setRequeued] = useState<string[]>([]);
   const [stats, setStats] = useState({ reviewed: 0, again: 0, hard: 0, good: 0, easy: 0 });
   const [busy, setBusy] = useState(false);
+  // Before a session starts, the queue comes from Core’s due snapshot. Once a
+  // rating is made, local queue state controls requeue order for this session.
   const activeQueue = sessionActive ? queue : sortedMistakes(dueQuery.data ?? []);
   const current = activeQueue[0];
   const rate = async (quality: ReviewQuality) => {
+    // Again/Hard/Good/Easy intentionally use 1/3/4/5 to match the iOS/Core
+    // SRS contract. Ratings require the answer side to be visible first.
     if (!current || !flipped || busy) return;
     setBusy(true);
     try {
@@ -206,6 +238,8 @@ export function FlashcardsPage() {
       const nextStats = { ...stats, reviewed: stats.reviewed + 1, again: stats.again + (quality === 1 ? 1 : 0), hard: stats.hard + (quality === 3 ? 1 : 0), good: stats.good + (quality === 4 ? 1 : 0), easy: stats.easy + (quality === 5 ? 1 : 0) };
       setStats(nextStats);
       const rest = activeQueue.slice(1);
+      // An Again card returns once to the tail, but cannot loop indefinitely in
+      // the same session because `requeued` records that it already returned.
       if (quality === 1 && !requeued.includes(current.id)) {
         setRequeued((values) => [...values, current.id]);
         rest.push(current);
@@ -214,6 +248,8 @@ export function FlashcardsPage() {
       setFlipped(false);
       setSessionActive(true);
       if (!rest.length) setSummary(true);
+      // Review changes the source mistake, due queue, and derived trends; the
+      // three invalidations intentionally mirror the Mistakes page contract.
       await queryClient.invalidateQueries({ queryKey: ["mistakes"] });
       await queryClient.invalidateQueries({ queryKey: ["flashcards"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
@@ -224,6 +260,8 @@ export function FlashcardsPage() {
     }
   };
   const reset = () => {
+    // Reset only clears session presentation/statistics; persisted SRS state is
+    // already owned by Core and will be fetched again on the next session.
     setQueue([]);
     setSessionActive(false);
     setSummary(false);

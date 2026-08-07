@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "../types";
 import { pythonCodeForCompletedEvent, pythonCodeForConfirmation } from "./agentEvents";
 
+// The fixture mirrors the complete wire shape so each test can override only
+// the event fields relevant to its timeline scenario.
 function agentEvent(overrides: Partial<AgentEvent>): AgentEvent {
   return {
     run_id: "run-1",
@@ -24,6 +26,8 @@ function agentEvent(overrides: Partial<AgentEvent>): AgentEvent {
 }
 
 describe("Agent Python code events", () => {
+  // Confirmation payloads must expose the whole source, not a truncated
+  // preview, because this is the code a user is being asked to allow.
   it("extracts the complete Python source from a confirmation request", () => {
     const code = "def answer():\n    return 42\n\nprint(answer())";
     const confirmation = agentEvent({
@@ -35,6 +39,8 @@ describe("Agent Python code events", () => {
   });
 
   it("matches completed executions to the correct request by tool call id", () => {
+    // Sequence order alone is insufficient when multiple tool calls overlap;
+    // the tool call id is the stable correlation key.
     const firstRequest = agentEvent({
       sequence: 2,
       tool_call_id: "call-1",
@@ -56,6 +62,8 @@ describe("Agent Python code events", () => {
   });
 
   it("ignores malformed payloads and non-Python tools", () => {
+    // Timeline rendering is defensive: malformed JSON and unrelated tools
+    // should produce no code block rather than a test/runtime failure.
     const malformed = agentEvent({ kind: "ConfirmationRequired", payload_json: "{" });
     const otherTool = agentEvent({
       kind: "ConfirmationRequired",
@@ -68,6 +76,8 @@ describe("Agent Python code events", () => {
   });
 
   it("does not show a completion code block when execution was denied", () => {
+    // `user_denied` is a structured Core result and must remain visibly
+    // distinct from successful execution.
     const request = agentEvent({
       sequence: 2,
       payload_json: JSON.stringify({ language: "python", code: "print('denied')" }),
