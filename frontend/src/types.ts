@@ -1,3 +1,5 @@
+// These unions mirror Rust enum spellings at the Tauri boundary. Keep the
+// PascalCase values stable even though ordinary record fields use snake_case.
 export type TaskType = "Homework" | "Reading";
 export type AgentMode =
   | "Chat"
@@ -33,6 +35,8 @@ export type RunStatus =
   | "Cancelled"
   | "Completed";
 
+// Workspace and provider status are the initial app snapshot. ProviderStatus
+// is intentionally a redacted capability view and never contains an API key.
 export interface Workspace {
   id: string;
   root_path: string;
@@ -40,6 +44,8 @@ export interface Workspace {
 }
 
 export interface CloudAccount {
+  // Account metadata is safe to display in Settings; model availability is a
+  // capability list, not a credential or token payload.
   email: string;
   role: string;
   membership_type: string;
@@ -49,11 +55,15 @@ export interface CloudAccount {
 }
 
 export interface ByokConfig {
+  // BYOK status exposes endpoint/model metadata only. The secret itself stays
+  // in the host keyring and is never represented by this interface.
   base_url: string;
   model: string;
 }
 
 export interface ProviderStatus {
+  // `active_provider` describes selection, while the nullable configs describe
+  // what is configured; neither field is an authorization decision by itself.
   cloud_account: CloudAccount | null;
   byok_config: ByokConfig | null;
   has_saved_byok: boolean;
@@ -65,7 +75,11 @@ export interface AppSnapshot {
   provider: ProviderStatus;
 }
 
+// Local records preserve the Rust DTO field names here. `extra_json` carries
+// forward-compatible fields that the current frontend does not interpret.
 export interface Task {
+  // Due/reminder timestamps and completion state are consumed by Today/Tasks;
+  // the coach fields link optional AI proposals back to ordinary local tasks.
   id: string;
   title: string;
   task_type: TaskType;
@@ -86,6 +100,8 @@ export interface Task {
 }
 
 export interface Subject {
+  // `display_name` is presentation text while `name` remains the stable Core
+  // identity used by grade and trend records.
   id: string;
   name: string;
   enabled: boolean;
@@ -94,6 +110,8 @@ export interface Subject {
   extra_json: string;
 }
 
+// Phase, grade, diary, and SRS models are persisted records. Timestamp fields
+// remain ISO strings so the bridge does not introduce JavaScript Date objects.
 export interface StudyPhase {
   id: string;
   name: string;
@@ -107,6 +125,8 @@ export interface StudyPhase {
 }
 
 export interface Grade {
+  // Grade ratios are derived from score/full_score by Core; nullable image and
+  // ranking fields preserve records that do not have those inputs.
   id: string;
   subject: string;
   score: number;
@@ -124,6 +144,8 @@ export interface Grade {
 }
 
 export interface DiaryEntry {
+  // Diary content is local text. `updated_at` is used as the tie-breaker when
+  // multiple entries share the same calendar date.
   id: string;
   date: string;
   mood_score: number;
@@ -137,6 +159,8 @@ export interface DiaryEntry {
 }
 
 export interface ReviewState {
+  // These values are the persisted SM-2-compatible state. The next date is a
+  // wire timestamp, while the UI only chooses a review quality value.
   repetitions: number;
   ease_factor: number;
   interval_days: number;
@@ -146,6 +170,8 @@ export interface ReviewState {
   extra_json: string;
 }
 
+// A null review_state means a mistake is not enrolled in SRS yet; the UI uses
+// that distinction to show the explicit enrollment action.
 export interface MistakeNote {
   id: string;
   title: string;
@@ -173,6 +199,8 @@ export interface MistakeNote {
 }
 
 export interface Exam {
+  // Exam records retain both display names and scheduling/location fields so
+  // older imported workspaces can round-trip fields the page does not edit.
   id: string;
   name: string;
   exam_date: string;
@@ -193,6 +221,8 @@ export interface Exam {
 }
 
 export interface ComprehensiveExam {
+  // A comprehensive exam references multiple subject names and is refreshed
+  // through its own query key in the Exams page.
   id: string;
   name: string;
   exam_date: string;
@@ -206,6 +236,9 @@ export interface ComprehensiveExam {
   extra_json: string;
 }
 
+// P2 feature records use the existing camelCase JSON shape because those Core
+// commands currently transport JSON strings; do not generalize this group to
+// the snake_case DTO records above.
 export type CoachGoalStatus = "active" | "paused" | "achieved" | "abandoned";
 export type CoachProposalStatus = "pending" | "approved" | "rejected" | "expired" | "superseded";
 
@@ -219,6 +252,8 @@ export interface CoachGoalSubject {
 }
 
 export interface CoachGoal {
+  // `version` participates in proposal resolution: Core can reject a decision
+  // made against an older goal snapshot.
   id: string;
   title: string;
   subjects: CoachGoalSubject[];
@@ -239,6 +274,8 @@ export interface CoachPrediction { subject: string; predicted: number; lowerBoun
 export interface CoachRisk { id: string; title: string; severity: string; detail: string; }
 export interface CoachEvidence { source: string; detail: string; }
 export interface CoachAnalysis {
+  // Analysis contains model output plus a goal version; it is evidence for a
+  // proposal, not an instruction that the frontend executes directly.
   id: string; goalId: string; goalVersion: number; calculatedAt: string; decision: string;
   weightedPredicted: number; weightedLowerBound: number; weightedUpperBound: number; successProbability: number;
   predictions: CoachPrediction[]; risks: CoachRisk[]; evidence: CoachEvidence[]; dataFingerprint: string;
@@ -253,11 +290,15 @@ export interface CoachChat { id: string; goalId: string | null; title: string; c
 export interface CoachConversationMessage { id: string; chatId: string; role: string; content: string; createdAt: string; todoSuggestions: CoachProposalItem[]; }
 export interface CoachData { goals: CoachGoal[]; analyses: CoachAnalysis[]; proposals: CoachProposal[]; chats: CoachChat[]; messages: CoachConversationMessage[]; }
 
+// Reverse-planner and simulation values are feature snapshots. Their status
+// fields describe the persisted workflow rather than a React loading state.
 export interface ExamGoal { id: string; examName: string; subject: string; examDate: string; currentScore: number; targetScore: number; fullScore: number; phaseId: string | null; createdAt: string; }
 export interface ExamWeakPoint { id: string; topic: string; mastery: number; possibleScoreGain: number; priority: number; }
 export interface ExamPlanPhase { id: string; name: string; dayRange: string; goal: string; }
 export interface DailyExamTask { id: string; dayOffset: number; date: string; subject: string; durationMinutes: number; taskTitle: string; reason: string; }
 export interface ExamPlan { id: string; examGoalId: string; improvementTarget: number; summary: string; weakPoints: ExamWeakPoint[]; phases: ExamPlanPhase[]; dailyTasks: DailyExamTask[]; modelInfo: string; createdAt: string; }
+// Simulation questions and records are separate so answer behavior can be
+// tracked without mutating the generated question text or correct answer.
 export type ExamSimulationStatus = "preparing" | "running" | "grading" | "analyzing" | "completed" | "abandoned" | "analysisFailed";
 export type ExamQuestionKind = "multipleChoice" | "freeResponse";
 export interface ExamQuestion { id: string; kind: ExamQuestionKind; prompt: string; options: string[]; correctAnswer: string | null; explanation: string; points: number; }
@@ -269,12 +310,16 @@ export interface ExamSimulation { id: string; subject: string; createdAt: string
 
 export interface DailyReportPoint { date: string; studyMinutes: number; sessionCount: number; moodScore: number | null; energyScore: number | null; }
 export interface LearningReport {
+  // Report aggregates are selected by rangeDays and include daily points for
+  // export; the page does not derive a second set of statistics from them.
   rangeDays: number; fromDate: string; toDate: string; totalStudyMinutes: number; sessionCount: number; averageSessionMinutes: number;
   subjectDistribution: Record<string, number>; intensityDistribution: Record<string, number>; gradeCount: number; averageScoreRate: number | null;
   mistakeCount: number; examCount: number; topSubject: string | null; weakestSubject: string | null; dailyStudyMinutes: DailyReportPoint[];
   diaryCount: number; averageMoodScore: number | null; averageEnergyScore: number | null;
 }
 
+// Library entries and matches contain paths returned by Core; the frontend
+// renders them but does not resolve or concatenate filesystem paths itself.
 export interface FileEntry {
   relative_path: string;
   is_directory: boolean;
@@ -283,6 +328,8 @@ export interface FileEntry {
 }
 
 export interface SearchMatch {
+  // Search results are snippets with source-relative coordinates. They are
+  // display data, not permission to resolve arbitrary filesystem paths.
   relative_path: string;
   line_number: number | null;
   snippet: string;
@@ -300,6 +347,8 @@ export interface TodaySnapshot {
   suggestions: string[];
 }
 
+// These are Core-derived analytics snapshots. Pages display them and choose a
+// mode, but do not reimplement the trend, streak, or SRS calculations here.
 export interface SrsOverview {
   due_count: number;
   upcoming_count: number;
@@ -307,6 +356,8 @@ export interface SrsOverview {
 }
 
 export interface DailyTrendPoint {
+  // One point represents one calendar day; nullable mood/energy means no diary
+  // value was recorded rather than a measured zero.
   date: string;
   study_minutes: number;
   activity_points: number;
@@ -318,6 +369,8 @@ export interface DailyTrendPoint {
 }
 
 export interface SubjectTrend {
+  // The string fallback on trend permits forward-compatible Core labels while
+  // preserving the known rising/falling/steady presentation branches.
   subject: string;
   display_name: string;
   average_score_rate: number;
@@ -349,10 +402,14 @@ export interface SrsReviewResult {
   next_review_date: string;
 }
 
+// Timer snapshots represent process-backed state. A study session is a saved
+// result and may outlive the in-memory active timer that produced it.
 export type TimerStatus = "Idle" | "Running" | "Paused";
 export type SessionIntensity = "Peak" | "DeepFocus" | "Steady" | "Light" | "Recovery";
 
 export interface TimerSnapshot {
+  // `elapsed_seconds` is authoritative for the active process snapshot; the
+  // browser only displays it and sends lifecycle commands back to Core.
   status: TimerStatus;
   session_id: string | null;
   started_at: string | null;
@@ -363,6 +420,8 @@ export interface TimerSnapshot {
 }
 
 export interface StudySession {
+  // Completed sessions are durable history and may be manual or timer-origin;
+  // time_zone_identifier preserves the original local context when available.
   id: string;
   start_date: string;
   duration_seconds: number;
@@ -384,6 +443,8 @@ export interface TimeInvestmentSubject {
   extra_json: string;
 }
 
+// Notebook messages are local history records; AgentEvent is the live/persisted
+// timeline used to stream a run and resolve confirmation/input interactions.
 export interface AgentMessage {
   id: string;
   role: "User" | "Assistant";
@@ -392,6 +453,8 @@ export interface AgentMessage {
 }
 
 export interface AgentNotebook {
+  // Source paths scope Agent read tools for this notebook. Messages remain
+  // local history and are distinct from the live event timeline.
   id: string;
   title: string;
   source_paths: string[];
@@ -402,6 +465,8 @@ export interface AgentNotebook {
 }
 
 export interface CapabilityManifest {
+  // Capabilities describe the selectable mode/stage contract; max_loops is a
+  // Core safety limit, not a UI pagination setting.
   mode: AgentMode;
   title: string;
   description: string;
@@ -411,6 +476,8 @@ export interface CapabilityManifest {
 
 export interface AgentEvent {
   run_id: string;
+  // Sequence is monotonic per event stream and is the polling cursor. It is
+  // not an array index and must not be replaced with a batch length.
   sequence: number;
   timestamp: string;
   kind: AgentEventKind;
@@ -427,7 +494,11 @@ export interface AgentEvent {
   progress: number | null;
 }
 
+// Backup inspection and import results come from Core’s staged workflow. The
+// recovery path and warnings are informational outputs, not frontend writes.
 export interface BackupInspection {
+  // Inspection counts and conflict descriptors are shown before Replace is
+  // applied; the frontend does not merge records itself.
   id: string;
   schema_version: number;
   created_at: string;
@@ -445,6 +516,8 @@ export interface ImportReport {
 }
 
 export interface ApiError {
+  // Error fields are optional because this is a transport/display shape for
+  // serialized failures, not the richer Rust error enum.
   kind?: string;
   message?: string;
 }

@@ -1,3 +1,21 @@
+//! Versioned ZIP backup export/import with staged validation and recovery.
+//!
+//! Backup work is intentionally transactional: an archive is extracted into a
+//! private staging directory, validated for paths, sizes, checksums, typed
+//! records, and relationships, then applied through a separate transaction
+//! directory while the Workspace write lock is held. A recovery copy is made
+//! before the live `Data` and `Media` trees are swapped.
+//!
+//! Import is deliberately split into inspection and apply. Inspection may be
+//! cancelled and leaves the live tree untouched; apply takes an exclusive write
+//! guard, preserves a recovery point, prepares replacement directories, and
+//! swaps directory names only after all merge decisions have succeeded. The
+//! recovery copy is returned in `ImportReport` so a host can expose it to a
+//! repair workflow rather than pretending an import is irreversible.
+//!
+//! Schema 3 and 4 archives share the required core files. Extra data files are
+//! copied and syntactically checked even when this crate has no typed model,
+//! which prevents a round trip from becoming an accidental downgrade.
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -19,11 +37,14 @@ use crate::{
     validate_wire_relative_path,
 };
 
+// These limits protect both extraction memory/disk use and archive traversal.
 const FORMAT_IDENTIFIER: &str = "com.chenkai.gao.studypulse.backup";
 const MAX_ARCHIVE_ENTRIES: usize = 10_000;
 const MAX_SINGLE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
+// The manifest and checksums are mandatory, as are the compatibility data
+// files. Optional newer files may be copied through without being required.
 const REQUIRED_FILES: &[&str] = &[
     "manifest.json",
     "checksums.json",
@@ -47,6 +68,8 @@ const REQUIRED_FILES: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Archive metadata used to select a decoder and report its contents before
+/// applying anything to the live Workspace.
 pub struct BackupManifest {
     pub format_identifier: String,
     pub format_version: u32,
@@ -77,6 +100,7 @@ pub struct BackupManifest {
 }
 
 #[derive(Debug, Deserialize)]
+/// Checksum document stored separately so the manifest remains human-readable.
 struct Checksums {
     algorithm: String,
     files: BTreeMap<String, String>,
@@ -84,6 +108,7 @@ struct Checksums {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// One incoming/local difference identified during inspection.
 pub struct BackupConflict {
     pub key: String,
     pub domain: String,
@@ -92,6 +117,9 @@ pub struct BackupConflict {
 }
 
 #[derive(Debug, Clone)]
+/// Validated staged import plus its conflict summary.
+/// `staging_path` is private to prevent callers from substituting an arbitrary
+/// filesystem directory into `apply_backup`.
 pub struct BackupInspection {
     pub id: String,
     pub manifest: BackupManifest,
@@ -104,6 +132,7 @@ pub struct BackupInspection {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+/// Whether restore replaces the two data trees or merges record-by-record.
 pub enum RestoreMode {
     Replace,
     Merge,
@@ -111,6 +140,7 @@ pub enum RestoreMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// User decision for one conflict key produced by inspection.
 pub struct BackupResolution {
     pub conflict_key: String,
     pub use_incoming: bool,
@@ -118,6 +148,7 @@ pub struct BackupResolution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Result of a successful restore, including the recoverable pre-restore path.
 pub struct ImportReport {
     pub imported_records: u64,
     pub kept_local_records: u64,
@@ -127,6 +158,7 @@ pub struct ImportReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Export switches that affect media inclusion and descriptive metadata.
 pub struct BackupExportOptions {
     #[serde(default = "default_true")]
     pub includes_media: bool,
@@ -141,31 +173,43 @@ pub struct BackupExportOptions {
 }
 
 fn default_true() -> bool {
+    // Media is included by default for a complete local backup.
     true
 }
 
 fn default_locale() -> String {
+    // Stable fallback for callers that do not provide a UI locale.
     "en_US".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+/// Archive path and manifest returned after export completes.
 pub struct BackupExportResult {
     pub archive_path: String,
     pub manifest: BackupManifest,
 }
 
 impl Workspace {
+    /// Extract and validate an archive without mutating the live Workspace.
+    /// The returned inspection owns a private staging directory used by the
+    /// later apply/cancel operation.
     pub fn inspect_backup(&self, archive_path: impl AsRef<Path>) -> Result<BackupInspection> {
         let id = Uuid::new_v4().to_string();
         let staging = self.root().join(".studypulse/cache/imports").join(&id);
         fs::create_dir_all(&staging)?;
+        // Cleanup is best-effort on validation failure; a failed inspection must
+        // never leave untrusted extracted content presented as an active session.
         if let Err(error) = extract_and_validate(archive_path.as_ref(), &staging) {
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
+        // Manifest decoding is repeated here after extraction so malformed
+        // metadata cannot be hidden by a valid archive container.
         let manifest: BackupManifest =
             serde_json::from_slice(&fs::read(staging.join("manifest.json"))?)?;
+        // Check typed values and cross-file links only after archive-level
+        // checksums and required files have passed.
         validate_decoded_content(&staging, &manifest)?;
         let (added_records, identical_records, conflicts) = compare_import(self.root(), &staging)?;
         Ok(BackupInspection {
@@ -179,15 +223,22 @@ impl Workspace {
         })
     }
 
+    /// Apply a previously inspected backup as one Data/Media tree swap.
+    /// A recovery copy is created first, and all intermediate work occurs under
+    /// `.studypulse/cache` so a failed rename can restore the original trees.
     pub fn apply_backup(
         &self,
         inspection: &BackupInspection,
         mode: RestoreMode,
         resolutions: &[BackupResolution],
     ) -> Result<ImportReport> {
+        // The inspection token is also the capability for using its staging
+        // directory; a missing directory means the session was cancelled/cleaned.
         if !inspection.staging_path.exists() {
             return Err(WorkspaceError::ImportSessionNotFound);
         }
+        // Keep reads/upserts from racing the recovery snapshot or the final
+        // directory exchange.
         let _guard = self.exclusive_write();
         let operation_id = Uuid::new_v4().to_string();
         let recovery = self
@@ -195,6 +246,8 @@ impl Workspace {
             .join(".studypulse/recovery")
             .join(format!("BeforeRestore-{operation_id}"));
         fs::create_dir_all(&recovery)?;
+        // Recovery is intentionally separate from the transaction directories:
+        // it remains available to a user even after a successful import.
         copy_tree(&self.root().join("Data"), &recovery.join("Data"))?;
         copy_tree(&self.root().join("Media"), &recovery.join("Media"))?;
 
@@ -202,17 +255,24 @@ impl Workspace {
             .root()
             .join(".studypulse/cache")
             .join(format!("apply-{operation_id}"));
+        // Keep transaction trees parallel to the live names so the final swap is
+        // a pair of directory renames rather than a large file-by-file update.
         let transaction_data = transaction.join("Data");
         let transaction_media = transaction.join("Media");
         fs::create_dir_all(&transaction_data)?;
         fs::create_dir_all(&transaction_media)?;
 
+        // Borrow conflict keys from the caller's resolution list; the map is
+        // used only during this synchronous operation.
         let resolution_map: HashMap<&str, bool> = resolutions
             .iter()
             .map(|resolution| (resolution.conflict_key.as_str(), resolution.use_incoming))
             .collect();
+        // Build the complete replacement trees before touching live paths.
         let (imported_records, kept_local_records) = match mode {
             RestoreMode::Replace => {
+                // Replace ignores local records but still copies the staged
+                // archive as a complete tree, including unknown files.
                 copy_tree(&inspection.staging_path.join("data"), &transaction_data)?;
                 copy_tree(&inspection.staging_path.join("media"), &transaction_media)?;
                 (
@@ -221,6 +281,8 @@ impl Workspace {
                 )
             }
             RestoreMode::Merge => {
+                // Merge starts from local content and applies only incoming
+                // records selected by the conflict resolution map.
                 copy_tree(&self.root().join("Data"), &transaction_data)?;
                 copy_tree(&self.root().join("Media"), &transaction_media)?;
                 merge_data(
@@ -232,6 +294,8 @@ impl Workspace {
         };
 
         if mode == RestoreMode::Merge {
+            // Media is merged after Data so its conflict keys are evaluated with
+            // the same staged transaction lifetime.
             merge_media(
                 &inspection.staging_path.join("media"),
                 &transaction_media,
@@ -239,6 +303,8 @@ impl Workspace {
             )?;
         }
 
+        // Rename old trees out of the way, then install prepared trees. Each
+        // failure branch attempts to put the previous names back before return.
         let old_data = self
             .root()
             .join(".studypulse/cache")
@@ -251,20 +317,27 @@ impl Workspace {
         let media = self.root().join("Media");
         fs::rename(&data, &old_data)?;
         if let Err(error) = fs::rename(&transaction_data, &data) {
+            // Restore the old Data name if installing the prepared tree fails.
             fs::rename(&old_data, &data)?;
             return Err(error.into());
         }
         if let Err(error) = fs::rename(&media, &old_media) {
+            // Data has been installed but Media has not moved; put Data back
+            // before returning the error.
             let _ = fs::rename(&data, &transaction_data);
             let _ = fs::rename(&old_data, &data);
             return Err(error.into());
         }
         if let Err(error) = fs::rename(&transaction_media, &media) {
+            // The last rename failure is also rolled back best-effort, including
+            // both old trees and the prepared Data directory.
             let _ = fs::rename(&data, &transaction_data);
             let _ = fs::rename(&old_data, &data);
             let _ = fs::rename(&old_media, &media);
             return Err(error.into());
         }
+        // Cleanup is not part of the data swap's success condition; the recovery
+        // directory is retained while temporary transaction remnants are not.
         let _ = fs::remove_dir_all(old_data);
         let _ = fs::remove_dir_all(old_media);
         let _ = fs::remove_dir_all(transaction);
@@ -278,6 +351,7 @@ impl Workspace {
         })
     }
 
+    /// Discard an inspection's staged files without touching live data.
     pub fn cancel_backup(&self, inspection: &BackupInspection) -> Result<()> {
         if inspection
             .staging_path
@@ -289,11 +363,15 @@ impl Workspace {
         Ok(())
     }
 
+    /// Copy current Workspace data into a staging tree, create a manifest and
+    /// SHA-256 checksums, then package the tree as a ZIP archive.
     pub fn export_backup(
         &self,
         archive_path: impl AsRef<Path>,
         options: BackupExportOptions,
     ) -> Result<BackupExportResult> {
+        // A per-operation staging path keeps concurrent exports from sharing
+        // partial manifests or checksum files.
         let operation_id = Uuid::new_v4().to_string();
         let staging = self
             .root()
@@ -302,11 +380,17 @@ impl Workspace {
         let data = staging.join("data");
         let media = staging.join("media");
         fs::create_dir_all(&data)?;
+        // Copy known and unknown Data files alike so newer schema fields survive
+        // a round trip through this older desktop build.
         initialize_export_data(self.root(), &data)?;
         if options.includes_media {
+            // Copy media only when requested; the manifest still records missing
+            // references so an intentionally data-only export is transparent.
             copy_tree(&self.root().join("Media"), &media)?;
         }
 
+        // Counts are advisory metadata, but they are calculated from staged
+        // bytes so the manifest describes exactly what will be archived.
         let mut counts = BTreeMap::new();
         for entry in fs::read_dir(&data)? {
             let entry = entry?;
@@ -318,8 +402,11 @@ impl Workspace {
                 continue;
             };
             if path.extension().and_then(|value| value.to_str()) == Some("jsonl") {
+                // JSONL count is physical non-empty envelope count, matching
+                // import validation rather than decoded array length.
                 counts.insert(key.into(), count_nonempty_lines(&path)?);
             } else if name == "subjects.json" {
+                // Subjects is the one record-like JSON array domain.
                 let values: Vec<Value> = serde_json::from_slice(&fs::read(path)?)?;
                 counts.insert(key.into(), values.len());
             } else if name.ends_with(".json") {
@@ -332,7 +419,11 @@ impl Workspace {
         } else {
             (0, 0)
         };
+        // Compute warnings before writing the manifest so count and warning list
+        // describe one immutable staged snapshot.
         let warnings = missing_media_warnings(&data, &media, options.includes_media)?;
+        // Timestamps are UTC seconds: the manifest describes an export event,
+        // not a record update requiring millisecond ordering.
         let manifest = BackupManifest {
             format_identifier: FORMAT_IDENTIFIER.into(),
             format_version: 1,
@@ -350,11 +441,15 @@ impl Workspace {
             missing_media_count: warnings.len(),
             warnings,
         };
+        // The staging tree is private and not a live Workspace file, so direct
+        // writes are appropriate here; the final archive is the public output.
         fs::write(
             staging.join("manifest.json"),
             serde_json::to_vec_pretty(&manifest)?,
         )?;
 
+        // Hash every staged file except that checksums.json is created after the
+        // set is collected, avoiding a self-referential checksum entry.
         let mut checksummed = BTreeMap::new();
         for entry in WalkDir::new(&staging)
             .follow_links(false)
@@ -376,17 +471,23 @@ impl Workspace {
                 "files": checksummed,
             }))?,
         )?;
+        // Archive creation is last: every included file and checksum already
+        // exists in staging, and no partial archive is reported as success.
         create_archive(&staging, archive_path.as_ref())?;
+        // Return the caller's requested archive path, not the temporary staging path.
         let result = BackupExportResult {
             archive_path: archive_path.as_ref().to_string_lossy().into_owned(),
             manifest,
         };
+        // The archive is now self-contained; staging is disposable after success.
         let _ = fs::remove_dir_all(staging);
         Ok(result)
     }
 }
 
 fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
+    // Validate names and limits before writing each entry. The staging root is
+    // trusted only after this portable-path check rejects traversal and links.
     let file = File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
@@ -398,11 +499,15 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
     let mut total_size = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
+        // Normalize backslashes before validation so Windows-created archives
+        // and Unix-created archives share one wire-path policy.
         let raw_name = entry.name().replace('\\', "/");
         let name = raw_name.trim_end_matches('/');
         if name.is_empty() {
             continue;
         }
+        // Validate before duplicate tracking and size accounting so unsafe
+        // aliases cannot produce confusing conflict/error results.
         validate_wire_relative_path(name)
             .map_err(|_| WorkspaceError::InvalidBackup(format!("unsafe path: {name}")))?;
         if !seen.insert(name.to_string()) {
@@ -410,6 +515,8 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
                 "duplicate archive entry: {name}"
             )));
         }
+        // ZIP symlink metadata is rejected even if the link target is not yet
+        // present in staging; extraction must never create redirect entries.
         if entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
@@ -423,12 +530,16 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
                 "entry is too large: {name}"
             )));
         }
+        // Saturating addition avoids overflow turning a huge archive into a
+        // small total-size value.
         total_size = total_size.saturating_add(entry.size());
         if total_size > MAX_TOTAL_BYTES {
             return Err(WorkspaceError::InvalidBackup(
                 "archive expands beyond the allowed size".into(),
             ));
         }
+        // Joining is safe only because `name` has passed the wire-path policy;
+        // directories are created explicitly instead of following archive links.
         let destination = staging.join(name);
         if entry.is_dir() || raw_name.ends_with('/') {
             fs::create_dir_all(destination)?;
@@ -442,6 +553,7 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
         output.flush()?;
     }
 
+    // Required-file checks catch incomplete archives before any typed parsing.
     for required in REQUIRED_FILES {
         if !staging.join(required).is_file() {
             return Err(WorkspaceError::InvalidBackup(format!(
@@ -449,6 +561,8 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
             )));
         }
     }
+    // Re-read the manifest from the extracted bytes so the archive's declared
+    // format, schema, and encryption flags are part of the verified content.
     let manifest: BackupManifest =
         serde_json::from_slice(&fs::read(staging.join("manifest.json"))?)?;
     if manifest.format_identifier != FORMAT_IDENTIFIER || manifest.format_version != 1 {
@@ -466,6 +580,8 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
             "encrypted backups are not supported".into(),
         ));
     }
+    // Checksums are validated for every listed file, including unexpected files
+    // copied through for forward compatibility.
     let checksums: Checksums = serde_json::from_slice(&fs::read(staging.join("checksums.json"))?)?;
     if !checksums.algorithm.eq_ignore_ascii_case("SHA-256") {
         return Err(WorkspaceError::InvalidBackup(
@@ -477,6 +593,8 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
         .copied()
         .filter(|path| *path != "checksums.json")
     {
+        // Every required payload must have an integrity entry; checksums.json
+        // itself is intentionally excluded from this loop.
         if !checksums.files.contains_key(required) {
             return Err(WorkspaceError::InvalidBackup(format!(
                 "checksum is missing: {required}"
@@ -484,14 +602,19 @@ fn extract_and_validate(archive_path: &Path, staging: &Path) -> Result<()> {
         }
     }
     for (path, expected) in checksums.files {
+        // Checksum names are input paths too, so they receive the same portable
+        // traversal policy as ZIP entries.
         validate_wire_relative_path(&path)
             .map_err(|_| WorkspaceError::InvalidBackup(format!("unsafe checksum path: {path}")))?;
         let file = staging.join(&path);
         if !file.is_file() {
+            // A checksum for a directory or absent file is never meaningful.
             return Err(WorkspaceError::InvalidBackup(format!(
                 "checksummed file is missing: {path}"
             )));
         }
+        // Hash the extracted file, not the compressed stream, so integrity is
+        // checked against the payload that will later be imported.
         let actual = sha256_file(&file)?;
         if !actual.eq_ignore_ascii_case(&expected) {
             return Err(WorkspaceError::InvalidBackup(format!(
@@ -527,6 +650,8 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
     // this build has no typed UI for them yet.
     let source_data = root.join("Data");
     if source_data.is_dir() {
+        // Copy unknown files too: export is a compatibility boundary, not a
+        // typed projection that is allowed to drop newer data.
         for entry in WalkDir::new(&source_data)
             .follow_links(false)
             .into_iter()
@@ -538,6 +663,7 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
                 .strip_prefix(&source_data)
                 .map_err(|_| WorkspaceError::PathEscape(entry.path().display().to_string()))?;
             let target = destination.join(relative);
+            // Preserve relative subdirectories for any future nested domain.
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -590,6 +716,8 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
             }"#,
         ),
     ];
+    // Ensure the standard JSONL set exists even when a very old Workspace did
+    // not create one of the newer files yet.
     for file in JSONL_FILES {
         let source = root.join("Data").join(file);
         let target = destination.join(file);
@@ -597,9 +725,13 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
             fs::write(target, [])?;
         }
     }
+    // Singleton defaults repair only absent/empty legacy placeholders; existing
+    // meaningful content is never replaced during export preparation.
     for (file, default_value) in JSON_FILES {
         let source = root.join("Data").join(file);
         let target = destination.join(file);
+        // The old `{}` placeholders carry no useful user data and may be
+        // replaced with the richer export defaults; non-empty files are kept.
         let invalid_singleton = target.exists()
             && matches!(
                 *file,
@@ -612,6 +744,8 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
             fs::write(target, default_value.as_bytes())?;
         }
     }
+    // Health history is optional and intentionally copied without entering the
+    // required-file list, preserving compatibility with older backups.
     if root.join("Data/health_history.json").is_file() {
         fs::copy(
             root.join("Data/health_history.json"),
@@ -622,6 +756,8 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
 }
 
 fn manifest_key_for_file(name: &str) -> Option<&'static str> {
+    // Keep manifest vocabulary independent of filenames so the public report
+    // remains stable if an internal filename is ever migrated.
     match name {
         "subjects.json" => Some("subjects"),
         "grades.jsonl" => Some("grades"),
@@ -651,6 +787,8 @@ fn manifest_key_for_file(name: &str) -> Option<&'static str> {
 }
 
 fn validate_coach_jsonl(path: &Path) -> Result<()> {
+    // Coach rows carry typed JSON inside Base64; decode known kinds here while
+    // allowing unknown kinds to pass through for forward compatibility.
     for (index, line) in BufReader::new(File::open(path)?).lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
@@ -661,6 +799,8 @@ fn validate_coach_jsonl(path: &Path) -> Result<()> {
                 path: format!("{}:{}", path.display(), index + 1),
                 detail: error.to_string(),
             })?;
+        // Decode only known Coach kinds; unknown kinds are checked structurally
+        // elsewhere and remain valid forward-compatible rows.
         match row.kind.as_str() {
             "goal" => {
                 let _: crate::CoachGoal = decode_coach_payload(&row)?;
@@ -684,6 +824,8 @@ fn validate_coach_jsonl(path: &Path) -> Result<()> {
 }
 
 fn media_stats(root: &Path) -> Result<(usize, u64)> {
+    // Media statistics are computed from files in the staged tree, not from
+    // references, so manifest counts reflect actual archive payload size.
     if !root.exists() {
         return Ok((0, 0));
     }
@@ -702,6 +844,9 @@ fn media_stats(root: &Path) -> Result<(usize, u64)> {
 }
 
 fn missing_media_warnings(data: &Path, media: &Path, includes_media: bool) -> Result<Vec<String>> {
+    // References come from known iOS fields; missing media becomes a warning so
+    // export remains useful while making loss visible to the user.
+    // Collect all known reference fields first, then deduplicate warnings once.
     let mut references = Vec::new();
     for (file, field, category) in [
         ("grades.jsonl", "imageFileName", "images"),
@@ -731,6 +876,7 @@ fn missing_media_warnings(data: &Path, media: &Path, includes_media: bool) -> Re
     }
     let mut warnings = Vec::new();
     for (category, name) in references {
+        // A media reference is relative to its category, never a free path.
         let relative = format!("{category}/{name}");
         if !includes_media || !media.join(&relative).is_file() {
             warnings.push(format!("missing media reference: {relative}"));
@@ -742,6 +888,8 @@ fn missing_media_warnings(data: &Path, media: &Path, includes_media: bool) -> Re
 }
 
 fn create_archive(source: &Path, archive_path: &Path) -> Result<()> {
+    // Archive only regular files and never follow links. ZIP entry names use the
+    // same slash-normalized relative form validated during import.
     if let Some(parent) = archive_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -757,6 +905,7 @@ fn create_archive(source: &Path, archive_path: &Path) -> Result<()> {
             .path()
             .strip_prefix(source)
             .map_err(|_| WorkspaceError::PathEscape(entry.path().display().to_string()))?;
+        // Normalize archive names even when exporting on Windows.
         let wire = relative.to_string_lossy().replace('\\', "/");
         writer.start_file(wire, SimpleFileOptions::default())?;
         let mut input = File::open(entry.path())?;
@@ -767,9 +916,15 @@ fn create_archive(source: &Path, archive_path: &Path) -> Result<()> {
 }
 
 fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result<()> {
+    // This is the semantic validation phase: syntax/checksum checks have passed,
+    // so now enforce RFC3339 dates, typed record invariants, counts, and links.
+    // The manifest timestamp is the first semantic date checked because it is
+    // needed to explain when the archive was produced.
     chrono::DateTime::parse_from_rfc3339(&manifest.created_at).map_err(|error| {
         WorkspaceError::InvalidBackup(format!("manifest createdAt is invalid: {error}"))
     })?;
+    // Typed validators cover domains with strict model rules. Generic validation
+    // below still checks every copied JSONL file for syntax and duplicate IDs.
     validate_typed_jsonl::<TaskItem>(&staging.join("data/tasks.jsonl"), |record| {
         if record.id != record.value.id {
             return Err("envelope id mismatch".into());
@@ -800,6 +955,8 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
         }
         record.value.validate().map_err(|error| error.to_string())
     })?;
+    // P2 domains were added after the original required list, so validate them
+    // conditionally when present in a schema-3 or schema-4 archive.
     if staging.join("data/exam_goals.jsonl").is_file() {
         validate_typed_jsonl::<ExamGoal>(&staging.join("data/exam_goals.jsonl"), |record| {
             if record.id != record.value.id {
@@ -831,8 +988,12 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
         validate_coach_jsonl(&staging.join("data/coach_data.jsonl"))?;
     }
 
+    // Unknown files are accepted, but their JSON must remain parseable so a
+    // later client can safely consume the exported Workspace.
     for entry in fs::read_dir(staging.join("data"))? {
         let entry = entry?;
+        // Generic validation complements typed validation and covers files that
+        // this release copied through without a Rust model.
         match entry.path().extension().and_then(|value| value.to_str()) {
             Some("jsonl") => validate_generic_jsonl(&entry.path())?,
             Some("json") => {
@@ -846,6 +1007,8 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
             _ => {}
         }
     }
+    // Counts are checked only when present in the manifest to support older
+    // schema versions that did not report every domain.
     for (manifest_key, file_name) in [
         ("grades", "grades.jsonl"),
         ("mistakes", "mistakes.jsonl"),
@@ -866,6 +1029,8 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
             && let Some(expected) = manifest.record_counts.get(manifest_key)
         {
             let actual = count_nonempty_lines(&path)?;
+            // Counts catch truncation or accidental extra lines even when the
+            // JSON remains syntactically valid and checksums were regenerated.
             if *expected != actual {
                 return Err(WorkspaceError::InvalidBackup(format!(
                     "{manifest_key} record count does not match manifest"
@@ -884,6 +1049,8 @@ fn validate_typed_jsonl<T>(
 where
     T: for<'de> Deserialize<'de>,
 {
+    // Validate every typed envelope while tracking duplicate IDs independently
+    // of the domain's model-level validation callback.
     let file = File::open(path)?;
     let mut ids = HashSet::new();
     for (index, line) in BufReader::new(file).lines().enumerate() {
@@ -902,6 +1069,8 @@ where
                 path.display()
             )));
         }
+        // Envelope timestamps are optional for old files, but when present they
+        // must still be valid RFC3339 values.
         if let Some(updated_at) = &record.updated_at {
             chrono::DateTime::parse_from_rfc3339(updated_at).map_err(|error| {
                 WorkspaceError::MalformedData {
@@ -919,7 +1088,11 @@ where
 }
 
 fn validate_relationships(staging: &Path) -> Result<()> {
+    // Build UUID sets once, then verify foreign-key-like links across records.
+    // Backup import must reject dangling links before replacing live data.
     let data = staging.join("data");
+    // These sets are the local foreign-key vocabulary used by the subsequent
+    // relationship checks.
     let phases = read_jsonl_map(&data.join("phases.jsonl"))?
         .into_keys()
         .collect::<HashSet<_>>();
@@ -941,6 +1114,7 @@ fn validate_relationships(staging: &Path) -> Result<()> {
         .into_keys()
         .collect::<HashSet<_>>();
 
+    // Phase and exam references are shared by several domains.
     for (kind, file) in [
         ("task", "tasks.jsonl"),
         ("grade", "grades.jsonl"),
@@ -956,6 +1130,7 @@ fn validate_relationships(staging: &Path) -> Result<()> {
             if let Some(phase_id) = value.get("phaseId").and_then(Value::as_str)
                 && !phases.contains(phase_id)
             {
+                // Missing links are rejected before live trees are swapped.
                 return Err(WorkspaceError::InvalidBackup(format!(
                     "{kind} references missing phase UUID: {phase_id}"
                 )));
@@ -970,6 +1145,7 @@ fn validate_relationships(staging: &Path) -> Result<()> {
             }
         }
     }
+    // Exam reviews point back to mistakes and therefore need a second pass.
     for (_, record) in read_jsonl_map(&data.join("exams.jsonl"))? {
         if let Some(ids) = record
             .get("value")
@@ -978,6 +1154,8 @@ fn validate_relationships(staging: &Path) -> Result<()> {
             .and_then(Value::as_array)
         {
             for id in ids.iter().filter_map(Value::as_str) {
+                // Exam review links are user-visible navigation targets, so a
+                // dangling mistake UUID is not safe to import.
                 if !mistakes.contains(id) {
                     return Err(WorkspaceError::InvalidBackup(format!(
                         "exam review references missing mistake UUID: {id}"
@@ -986,6 +1164,8 @@ fn validate_relationships(staging: &Path) -> Result<()> {
             }
         }
     }
+    // Materialized routines and investment targets are checked separately from
+    // the generic phase/exam loop because their wire shapes differ.
     for (_, record) in read_jsonl_map(&data.join("routine_instances.jsonl"))? {
         if let Some(routine_id) = record
             .get("value")
@@ -1002,6 +1182,8 @@ fn validate_relationships(staging: &Path) -> Result<()> {
         let Some(value) = record.get("value") else {
             continue;
         };
+        // Both subject and parent links are optional, but each present UUID must
+        // resolve within the same staged archive.
         let subject_id = value.get("subjectId").and_then(Value::as_str);
         if let Some(subject_id) = subject_id
             && !investment_subjects.contains(subject_id)
@@ -1059,6 +1241,8 @@ fn validate_relationships(staging: &Path) -> Result<()> {
 }
 
 fn validate_generic_jsonl(path: &Path) -> Result<()> {
+    // Unknown JSONL domains do not get a typed validator, but still cannot have
+    // malformed JSON or repeated IDs hidden behind a future schema.
     let file = File::open(path)?;
     let mut ids = HashSet::new();
     for (index, line) in BufReader::new(file).lines().enumerate() {
@@ -1084,6 +1268,8 @@ fn validate_generic_jsonl(path: &Path) -> Result<()> {
 }
 
 fn compare_import(root: &Path, staging: &Path) -> Result<(u64, u64, Vec<BackupConflict>)> {
+    // Inspection compares semantic JSONL records by UUID and singleton files by
+    // bytes. This gives the UI actionable conflict keys before apply.
     let mut added = 0_u64;
     let mut identical = 0_u64;
     let mut conflicts = Vec::new();
@@ -1136,6 +1322,7 @@ fn compare_import(root: &Path, staging: &Path) -> Result<(u64, u64, Vec<BackupCo
             }
         }
     }
+    // Media has no record envelope, so compare it by relative path and SHA-256.
     compare_media(root, staging, &mut added, &mut identical, &mut conflicts)?;
     Ok((added, identical, conflicts))
 }
@@ -1147,6 +1334,8 @@ fn compare_media(
     identical: &mut u64,
     conflicts: &mut Vec<BackupConflict>,
 ) -> Result<()> {
+    // Missing media is an addition, same hashes are identical, and differing
+    // hashes require an explicit resolution just like a JSONL record conflict.
     let media = staging.join("media");
     if !media.exists() {
         return Ok(());
@@ -1184,6 +1373,8 @@ fn merge_data(
     target: &Path,
     resolutions: &HashMap<&str, bool>,
 ) -> Result<(u64, u64)> {
+    // Merge starts from a copied local tree; only selected incoming conflicts
+    // replace records, so an error before the final swap leaves live data intact.
     let mut imported = 0_u64;
     let mut kept = 0_u64;
     for entry in fs::read_dir(incoming)? {
@@ -1194,6 +1385,8 @@ fn merge_data(
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("unknown");
+        // JSONL is merged by record key; singleton JSON is resolved as one
+        // conflict because there is no safe domain-specific merge contract.
         if source
             .extension()
             .is_some_and(|extension| extension == "jsonl")
@@ -1204,6 +1397,8 @@ fn merge_data(
                 HashMap::new()
             };
             for (key, value) in read_jsonl_map(&source)? {
+                // Resolution keys include the domain to avoid collisions between
+                // identical UUID strings in different files.
                 let conflict_key = format!("{domain}:{key}");
                 if local.contains_key(&key)
                     && resolutions
@@ -1216,6 +1411,8 @@ fn merge_data(
                     imported += 1;
                 }
             }
+            // The destination is still inside the transaction tree, so a
+            // partially written merge cannot damage the live Workspace.
             write_jsonl_map(&destination, local)?;
         } else {
             let conflict_key = format!("{domain}:singleton");
@@ -1235,6 +1432,8 @@ fn merge_data(
 }
 
 fn merge_media(incoming: &Path, target: &Path, resolutions: &HashMap<&str, bool>) -> Result<()> {
+    // Media conflicts use `media:<relative path>` keys and are copied only when
+    // the caller accepted incoming bytes or the local file is absent.
     if !incoming.exists() {
         return Ok(());
     }
@@ -1256,9 +1455,11 @@ fn merge_media(incoming: &Path, target: &Path, resolutions: &HashMap<&str, bool>
                 .get(conflict_key.as_str())
                 .is_some_and(|value| !*value)
         {
+            // An explicit local decision leaves the staged incoming file unused.
             continue;
         }
         if let Some(parent) = destination.parent() {
+            // Preserve the incoming category hierarchy under transaction Media.
             fs::create_dir_all(parent)?;
         }
         fs::copy(entry.path(), destination)?;
@@ -1267,6 +1468,8 @@ fn merge_media(incoming: &Path, target: &Path, resolutions: &HashMap<&str, bool>
 }
 
 fn read_jsonl_map(path: &Path) -> Result<HashMap<String, Value>> {
+    // Index JSONL by a stable record key for conflict comparison and merge.
+    // Raw Values are retained so unknown fields are not normalized away.
     let file = File::open(path)?;
     let mut values = HashMap::new();
     for (index, line) in BufReader::new(file).lines().enumerate() {
@@ -1274,18 +1477,26 @@ fn read_jsonl_map(path: &Path) -> Result<HashMap<String, Value>> {
         if line.trim().is_empty() {
             continue;
         }
+        // Syntax errors retain the physical file/line for repair tooling.
         let value: Value =
             serde_json::from_str(&line).map_err(|error| WorkspaceError::MalformedData {
                 path: format!("{}:{}", path.display(), index + 1),
                 detail: error.to_string(),
             })?;
+        // Legacy/generic rows without an ID use their content hash as a stable
+        // comparison key rather than being silently discarded.
         let key = record_id(&value).unwrap_or_else(|| sha256_bytes(line.as_bytes()));
+        // `insert` is intentional here: semantic duplicate detection happens in
+        // typed validation, while generic comparison only needs a last value for
+        // legacy rows that have no stable ID.
         values.insert(key, value);
     }
     Ok(values)
 }
 
 fn read_jsonl_map_if_exists(path: &Path) -> Result<HashMap<String, Value>> {
+    // Optional newer domains may not exist in schema-3 archives.
+    // Returning an empty map avoids manufacturing an error for optional files.
     if path.exists() {
         read_jsonl_map(path)
     } else {
@@ -1294,10 +1505,14 @@ fn read_jsonl_map_if_exists(path: &Path) -> Result<HashMap<String, Value>> {
 }
 
 fn write_jsonl_map(path: &Path, values: HashMap<String, Value>) -> Result<()> {
+    // Sort by key so merged archives are deterministic even when HashMap input
+    // order differs between runs.
     let mut values: Vec<_> = values.into_iter().collect();
     values.sort_by(|left, right| left.0.cmp(&right.0));
     let mut file = File::create(path)?;
     for (_, value) in values {
+        // Keep one physical JSON object per line so the result remains valid
+        // input for the generic JSONL reader.
         serde_json::to_writer(&mut file, &value)?;
         file.write_all(b"\n")?;
     }
@@ -1306,6 +1521,8 @@ fn write_jsonl_map(path: &Path, values: HashMap<String, Value>) -> Result<()> {
 }
 
 fn record_id(value: &Value) -> Option<String> {
+    // Typed rows put IDs at the envelope/value level; Coach rows encode them in
+    // a Base64 payload, so inspect that form before the generic fallbacks.
     if let (Some(kind), Some(payload)) = (
         value.get("kind").and_then(Value::as_str),
         value.get("payload").and_then(Value::as_str),
@@ -1315,6 +1532,7 @@ fn record_id(value: &Value) -> Option<String> {
     {
         return Some(format!("coach:{kind}:{id}"));
     }
+    // Standard records expose either the envelope ID or the nested value ID.
     value
         .get("id")
         .and_then(Value::as_str)
@@ -1323,9 +1541,13 @@ fn record_id(value: &Value) -> Option<String> {
 }
 
 fn display_name(value: &Value, fallback: &str) -> String {
+    // Conflict UI gets a human-readable label when possible; the stable key is
+    // still used as a fallback when the incoming row has no title/name.
     ["title", "name", "subject"]
         .into_iter()
         .find_map(|key| {
+            // Prefer nested `value` fields because JSONL envelopes put the
+            // display data there; singleton objects use their own top-level key.
             value
                 .get("value")
                 .and_then(|inner| inner.get(key))
@@ -1337,6 +1559,7 @@ fn display_name(value: &Value, fallback: &str) -> String {
 }
 
 fn count_nonempty_lines(path: &Path) -> Result<usize> {
+    // Blank separators do not represent records and are excluded from counts.
     Ok(BufReader::new(File::open(path)?)
         .lines()
         .map_while(std::result::Result::ok)
@@ -1345,6 +1568,8 @@ fn count_nonempty_lines(path: &Path) -> Result<usize> {
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    // Copy regular files/directories without following links. Recovery and
+    // transaction callers install the result only after the copy succeeds.
     if !source.exists() {
         fs::create_dir_all(destination)?;
         return Ok(());
@@ -1362,6 +1587,8 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         if relative.as_os_str().is_empty() {
             continue;
         }
+        // `relative` comes from a WalkDir rooted at `source`; only normal
+        // directory/file entries are materialized below the destination.
         let target = destination.join(relative);
         if entry.file_type().is_dir() {
             fs::create_dir_all(target)?;
@@ -1376,20 +1603,26 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
+    // Stream hashing in bounded chunks so large media files do not require a
+    // full in-memory buffer during archive validation.
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
+    // A fixed buffer bounds memory regardless of the media file size.
     let mut buffer = [0_u8; 32 * 1024];
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }
+        // Feed only the bytes read; the remainder of the buffer is stale data.
         hasher.update(&buffer[..count]);
     }
     Ok(hex::encode(hasher.finalize()))
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
+    // Small JSON rows can be hashed directly for generic merge keys.
+    // Hex output is stable in conflict keys and manifests.
     hex::encode(Sha256::digest(bytes))
 }
 
@@ -1399,6 +1632,8 @@ mod tests {
     use serde_json::json;
     use zip::{ZipWriter, write::SimpleFileOptions};
 
+    // Build small deterministic archives for schema/restore tests without
+    // relying on a fixture that could hide which required files are present.
     fn make_golden_backup(root: &Path, name: &str, manifest: &str) -> PathBuf {
         let archive_path = root.join(name);
         let mut files = BTreeMap::<String, Vec<u8>>::new();
@@ -1440,6 +1675,8 @@ mod tests {
     }
 
     #[test]
+    // Archive traversal, duplicate, and unsafe path defenses must fail before
+    // any import session becomes usable.
     fn rejects_unsafe_archive_path() {
         let temp = tempfile::tempdir().unwrap();
         let archive_path = temp.path().join("bad.studypulsebackup");
@@ -1457,6 +1694,8 @@ mod tests {
     }
 
     #[test]
+    // Both supported backup schemas use the same extraction/checksum contract,
+    // even when one predates newer typed domains.
     fn accepts_schema_3_and_4_golden_backups() {
         for (schema, manifest) in [
             (3, include_str!("../tests/fixtures/backup_manifest_v3.json")),
@@ -1476,6 +1715,8 @@ mod tests {
     }
 
     #[test]
+    // Replace restore preserves future/unknown fields and exposes a recovery
+    // directory for post-restore repair or inspection.
     fn replace_restore_keeps_unknown_fields_and_recovery_point() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
@@ -1503,6 +1744,8 @@ mod tests {
     }
 
     #[test]
+    // A Desktop export can be inspected and restored as schema 4 without losing
+    // data that this version does not have a typed UI for.
     fn desktop_export_is_schema4_round_trip_and_keeps_future_data() {
         let temp = tempfile::tempdir().unwrap();
         let source = Workspace::create(temp.path().join("Source")).unwrap();
