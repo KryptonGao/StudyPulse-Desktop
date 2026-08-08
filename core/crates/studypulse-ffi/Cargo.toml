@@ -13,9 +13,11 @@ path = "src/bin/uniffi-bindgen-swift.rs"
 
 [dependencies]
 chrono.workspace = true
+hex.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 studypulse-agent = { path = "../studypulse-agent" }
 studypulse-model-client = { path = "../studypulse-model-client" }
 studypulse-tools = { path = "../studypulse-tools" }
