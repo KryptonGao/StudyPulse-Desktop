@@ -176,4 +176,8 @@ npm run tauri:build
 
 Health/Recovery 模块尚未包含在当前客户端中；跨端同步、完整系统级日历/提醒集成、发布签名与分发流程也不属于当前默认能力。AI 生成结果仍需用户审核，本机 Python 执行后端也不是安全沙箱。
 
+## 维护说明
+
+本次 README 的轻量更新由 Codex 完成。
+
 <sub>当前仓库的桌面版本元数据为 <code>0.5.0</code>；发布状态以实际 GitHub Release 为准。</sub>
