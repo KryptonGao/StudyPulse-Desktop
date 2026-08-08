@@ -30,12 +30,6 @@ use uuid::Uuid;
 
 pub const MAX_AGENT_LOOPS: usize = 8;
 
-#[derive(Debug, Clone, Copy)]
-struct ToolPolicy {
-    allow_tools: bool,
-    read_only: bool,
-}
-
 // Modes describe user-visible workflows rather than separate runtimes.  The
 // manifest below supplies stage labels and a loop budget, while the runtime
 // still uses one common state machine for all modes.  Keeping this mapping in
@@ -410,49 +404,6 @@ impl AgentRuntime {
         source_paths: Vec<String>,
         history: Vec<ConversationMessage>,
     ) -> Result<String, AgentError> {
-        self.start_agent_with_mode_and_policy(
-            mode,
-            goal,
-            source_paths,
-            history,
-            ToolPolicy {
-                allow_tools: true,
-                read_only: false,
-            },
-        )
-    }
-
-    /// Start a feature caller with an explicit source boundary. Empty source
-    /// selection means no Workspace tools at all; non-empty selection exposes
-    /// only read tools scoped by the normal Workspace path checks.
-    pub fn start_feature_with_mode(
-        self: &Arc<Self>,
-        mode: AgentMode,
-        goal: String,
-        source_paths: Vec<String>,
-        history: Vec<ConversationMessage>,
-    ) -> Result<String, AgentError> {
-        let allow_tools = !source_paths.is_empty();
-        self.start_agent_with_mode_and_policy(
-            mode,
-            goal,
-            source_paths,
-            history,
-            ToolPolicy {
-                allow_tools,
-                read_only: true,
-            },
-        )
-    }
-
-    fn start_agent_with_mode_and_policy(
-        self: &Arc<Self>,
-        mode: AgentMode,
-        goal: String,
-        source_paths: Vec<String>,
-        history: Vec<ConversationMessage>,
-        tool_policy: ToolPolicy,
-    ) -> Result<String, AgentError> {
         // Input validation occurs before the run id is reserved.  This is
         // important for callers that retry a rejected request: an invalid goal
         // must not consume the single active-run slot or leave a phantom run
@@ -471,16 +422,13 @@ impl AgentRuntime {
                 "conversation history must not contain empty messages".into(),
             ));
         }
-        let source_paths = if tool_policy.allow_tools {
-            self.workspace
-                .list_selected_library_files(&source_paths)
-                .map_err(|error| AgentError::Runtime(error.to_string()))?
-                .into_iter()
-                .map(|entry| entry.relative_path)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let source_paths = self
+            .workspace
+            .list_selected_library_files(&source_paths)
+            .map_err(|error| AgentError::Runtime(error.to_string()))?
+            .into_iter()
+            .map(|entry| entry.relative_path)
+            .collect::<Vec<_>>();
         // Source resolution returns selected relative paths from Workspace.  The
         // Agent carries this list into every read invocation instead of trusting
         // a path proposed by the model during a later loop.
@@ -512,7 +460,6 @@ impl AgentRuntime {
                         goal,
                         source_paths,
                         history,
-                        tool_policy,
                     )),
                     Err(error) => {
                         runtime.finish_with_error(&control, error.to_string());
@@ -647,7 +594,6 @@ impl AgentRuntime {
         goal: String,
         source_paths: Vec<String>,
         history: Vec<ConversationMessage>,
-        tool_policy: ToolPolicy,
     ) {
         // This loop is the only place where a model response becomes a new
         // runtime action.  Keeping the ordering explicit makes the safety
@@ -701,29 +647,23 @@ impl AgentRuntime {
         messages.push(ChatMessage::User { content: goal });
         // Permission is serialized as a hint for weaker models, not as an
         // authorization grant.  The host repeats the decision at prepare time.
-        let definitions = if tool_policy.allow_tools {
-            self.tools
-                .definitions()
-                .into_iter()
-                .filter(|definition| tool_is_enabled(mode, &definition.name))
-                .filter(|definition| {
-                    !tool_policy.read_only || definition.permission == PermissionLevel::Read
-                })
-                .map(|definition| ModelToolDefinition {
-                    name: definition.name,
-                    description: definition.description,
-                    parameters: definition.parameters,
-                    permission: Some(
-                        serde_json::to_string(&definition.permission)
-                            .unwrap_or_else(|_| "\"read\"".into())
-                            .trim_matches('"')
-                            .to_owned(),
-                    ),
-                })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let definitions = self
+            .tools
+            .definitions()
+            .into_iter()
+            .filter(|definition| tool_is_enabled(mode, &definition.name))
+            .map(|definition| ModelToolDefinition {
+                name: definition.name,
+                description: definition.description,
+                parameters: definition.parameters,
+                permission: Some(
+                    serde_json::to_string(&definition.permission)
+                        .unwrap_or_else(|_| "\"read\"".into())
+                        .trim_matches('"')
+                        .to_owned(),
+                ),
+            })
+            .collect::<Vec<_>>();
 
         let max_loops = capability_manifests()
             .into_iter()
@@ -815,20 +755,6 @@ impl AgentRuntime {
                     return;
                 }
             };
-
-            if (!tool_policy.allow_tools || tool_policy.read_only)
-                && response.tool_calls.iter().any(|call| {
-                    !definitions
-                        .iter()
-                        .any(|definition| definition.name == call.name)
-                })
-            {
-                self.finish_with_error(
-                    &control,
-                    "the requested tool is outside this AI feature's read-only source scope".into(),
-                );
-                return;
-            }
 
             let streamed_text = streamed_text.lock().clone();
             // A provider can deliver text incrementally and also return the
@@ -1613,29 +1539,6 @@ mod tests {
                 .and_then(|tool| tool.permission.as_deref()),
             Some("execute")
         );
-    }
-
-    #[test]
-    fn feature_without_explicit_sources_exposes_no_workspace_tools() {
-        // Specialized callers receive only their structured input by default;
-        // an empty source selection must not inherit the general Agent meaning
-        // of “search the whole Workspace”.
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
-        let model = Arc::new(RecordingModel::default());
-        let runtime = AgentRuntime::with_clock(workspace, model.clone(), Arc::new(FixedClock));
-
-        let run_id = runtime
-            .start_feature_with_mode(
-                AgentMode::Coach,
-                "Feature input".into(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap();
-        wait_for_terminal(&runtime, &run_id);
-
-        assert!(model.requests.lock()[0].tools.is_empty());
     }
 
     #[derive(Debug)]
