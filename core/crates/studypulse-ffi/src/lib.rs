@@ -1,11 +1,14 @@
 #![cfg_attr(windows, allow(linker_messages))]
 
+mod ai;
+
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use parking_lot::Mutex;
@@ -31,6 +34,8 @@ use studypulse_workspace::{
     parse_structured_json, proposal_task,
 };
 use thiserror::Error;
+
+pub use ai::{AiAttachmentDto, AiFeatureCallerDto, AiFeatureDiagnosticsDto, AiFeatureRequestDto};
 
 // This crate is the single UniFFI facade over the Rust core.  DTOs are the
 // stable Swift/desktop boundary; internal Workspace, Agent, and provider types
@@ -854,6 +859,7 @@ pub struct StudyPulseCore {
     last_run_id: Mutex<Option<String>>,
     inspections: Mutex<HashMap<String, BackupInspection>>,
     operation_events: Mutex<HashMap<String, Vec<OperationEventDto>>>,
+    ai_state: Mutex<ai::AiFeatureState>,
     active_timer: Mutex<Option<ActiveTimer>>,
     restore_active: AtomicBool,
 }
@@ -881,6 +887,7 @@ impl StudyPulseCore {
             last_run_id: Mutex::new(None),
             inspections: Mutex::new(HashMap::new()),
             operation_events: Mutex::new(HashMap::new()),
+            ai_state: Mutex::new(ai::AiFeatureState::default()),
             active_timer: Mutex::new(None),
             restore_active: AtomicBool::new(false),
         })
@@ -1130,6 +1137,133 @@ impl StudyPulseCore {
             .map_err(CoreError::message)?;
         *self.last_run_id.lock() = Some(run_id.clone());
         Ok(run_id)
+    }
+
+    pub fn run_ai_feature_json(&self, request: AiFeatureRequestDto) -> Result<String, CoreError> {
+        // A feature caller is a bounded, synchronous facade over the existing
+        // event-driven Agent.  The frontend receives one validated result, so
+        // prompts and model JSON never need to be interpreted in React.
+        let prepared = ai::prepare(request).map_err(CoreError::message)?;
+        let started = Instant::now();
+        if let Some(output_json) = self.ai_state.lock().fresh(&prepared.cache_key) {
+            let diagnostic = AiFeatureDiagnosticsDto {
+                request_id: prepared.request_id.clone(),
+                caller: prepared.caller,
+                duration_ms: started.elapsed().as_millis() as u64,
+                cache_hit: true,
+                stale_result: false,
+                outcome: "cache".into(),
+                error_code: None,
+            };
+            self.ai_state.lock().record(diagnostic.clone());
+            return ai::envelope(&prepared, &output_json, diagnostic)
+                .map_err(|error| CoreError::message(error.message));
+        }
+
+        if self.restore_active.load(Ordering::Acquire) {
+            return Err(CoreError::message(
+                "cannot start AI feature while a backup restore is active",
+            ));
+        }
+        let runtime = self.runtime()?;
+        let history = prepared
+            .history
+            .clone()
+            .into_iter()
+            .map(|message| ConversationMessage {
+                role: match message.role {
+                    AgentMessageRoleDto::User => ConversationRole::User,
+                    AgentMessageRoleDto::Assistant => ConversationRole::Assistant,
+                },
+                content: message.content,
+            })
+            .collect();
+        let run_id = runtime
+            .start_feature_with_mode(
+                prepared.mode.into(),
+                prepared.prompt.clone(),
+                prepared.source_paths.clone(),
+                history,
+            )
+            .map_err(|error| CoreError::message(format!("AI feature could not start: {error}")))?;
+        *self.last_run_id.lock() = Some(run_id.clone());
+
+        let mut cursor = 0;
+        let mut raw = String::new();
+        let terminal = loop {
+            let events = runtime
+                .wait_for_events(&run_id, cursor, 1_000)
+                .map_err(|error| {
+                    CoreError::message(format!("AI feature event wait failed: {error}"))
+                })?;
+            let mut terminal = None;
+            for event in events {
+                cursor = cursor.max(event.sequence);
+                match event.kind {
+                    AgentEventKind::TextDelta => {
+                        if let Some(text) = event.text {
+                            raw.push_str(&text);
+                        }
+                    }
+                    // A feature caller never authorizes writes or interactive
+                    // questions. Cancel immediately if a provider attempts to
+                    // cross that boundary rather than leaving a synchronous IPC
+                    // request blocked on a UI response it cannot receive.
+                    AgentEventKind::ConfirmationRequired | AgentEventKind::InputRequired => {
+                        let _ = runtime.cancel_agent(&run_id);
+                    }
+                    AgentEventKind::Failed => {
+                        terminal = Some(Err(ai::AiFailure {
+                            code: "model_error",
+                            message: event.text.unwrap_or_else(|| "model request failed".into()),
+                        }));
+                    }
+                    AgentEventKind::Cancelled => {
+                        terminal = Some(Err(ai::AiFailure {
+                            code: "cancelled",
+                            message: "AI feature was cancelled".into(),
+                        }));
+                    }
+                    AgentEventKind::Completed => terminal = Some(Ok(())),
+                    _ => {}
+                }
+                if terminal.is_some() {
+                    break;
+                }
+            }
+            if let Some(terminal) = terminal {
+                break terminal;
+            }
+        };
+
+        let output_json = match terminal {
+            Ok(()) => match ai::parse_output(&prepared, &raw) {
+                Ok(output) => output,
+                Err(error) => return self.finish_ai_failure(&prepared, started, error),
+            },
+            Err(error) => return self.finish_ai_failure(&prepared, started, error),
+        };
+        self.ai_state
+            .lock()
+            .store(prepared.cache_key.clone(), output_json.clone());
+        let diagnostic = AiFeatureDiagnosticsDto {
+            request_id: prepared.request_id.clone(),
+            caller: prepared.caller,
+            duration_ms: started.elapsed().as_millis() as u64,
+            cache_hit: false,
+            stale_result: false,
+            outcome: "success".into(),
+            error_code: None,
+        };
+        self.ai_state.lock().record(diagnostic.clone());
+        ai::envelope(&prepared, &output_json, diagnostic)
+            .map_err(|error| CoreError::message(error.message))
+    }
+
+    pub fn get_ai_diagnostics_json(&self) -> String {
+        // Diagnostics deliberately contain only caller/timing/cache metadata;
+        // prompt, model output, credentials, and Workspace contents stay out.
+        self.ai_state.lock().diagnostics_json()
     }
 
     pub fn list_agent_capabilities(&self) -> Vec<CapabilityManifestDto> {
@@ -2269,6 +2403,34 @@ impl StudyPulseCore {
                 CoreError::message("no Workspace is open")
             }
         })
+    }
+
+    fn finish_ai_failure(
+        &self,
+        prepared: &ai::PreparedAiFeature,
+        started: Instant,
+        failure: ai::AiFailure,
+    ) -> Result<String, CoreError> {
+        if let Some(stale_json) = self.ai_state.lock().stale(&prepared.cache_key) {
+            let mut diagnostic = ai::failure_diagnostic(
+                prepared,
+                started.elapsed().as_millis() as u64,
+                failure.code,
+            );
+            diagnostic.stale_result = true;
+            diagnostic.outcome = "stale".into();
+            self.ai_state.lock().record(diagnostic.clone());
+            return ai::envelope(prepared, &stale_json, diagnostic)
+                .map_err(|error| CoreError::message(error.message));
+        }
+        let diagnostic =
+            ai::failure_diagnostic(prepared, started.elapsed().as_millis() as u64, failure.code);
+        self.ai_state.lock().record(diagnostic);
+        Err(CoreError::message(format!(
+            "AI {} failed: {}",
+            prepared.caller.label(),
+            failure.message
+        )))
     }
 }
 

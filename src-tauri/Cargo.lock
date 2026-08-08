@@ -3944,9 +3944,11 @@ name = "studypulse-ffi"
 version = "0.5.1"
 dependencies = [
  "chrono",
+ "hex",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "studypulse-agent",
  "studypulse-model-client",
  "studypulse-tools",
