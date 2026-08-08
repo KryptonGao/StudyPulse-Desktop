@@ -14,7 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use studypulse_ffi::{
-    AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, BackupExportOptionsDto,
+    AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, AiFeatureRequestDto, BackupExportOptionsDto,
     BackupExportResultDto, BackupInspectionDto, BackupResolutionDto, ByokConfigDto,
     CloudAccountDto, CloudAuthTokensDto, ComprehensiveExamDto, ConfirmationDecisionDto, CoreError,
     DiaryEntryDto, ExamDto, FileEntryDto, GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto,
@@ -562,6 +562,25 @@ async fn start_agent(
         core.start_agent_with_mode(input.mode, input.goal, input.source_paths, input.history)
     })
     .await
+}
+
+#[tauri::command]
+// Feature callers keep prompt construction, output validation, cache policy,
+// and stale-result decisions in Core. The host only transports the structured
+// request and returns the redacted result envelope.
+async fn run_ai_feature(
+    request: AiFeatureRequestDto,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    core_call(state, move |core| core.run_ai_feature_json(request)).await
+}
+
+#[tauri::command]
+// Diagnostics contain timing/cache/outcome metadata only; Core never exposes
+// prompts, raw responses, Workspace text, or credential-bearing request data.
+async fn get_ai_diagnostics(state: State<'_, AppState>) -> Result<String, AppError> {
+    let core = state.core.clone();
+    Ok(core.get_ai_diagnostics_json())
 }
 
 #[tauri::command]
@@ -1154,6 +1173,8 @@ pub fn run() {
             disconnect_ai,
             list_agent_capabilities,
             start_agent,
+            run_ai_feature,
+            get_ai_diagnostics,
             wait_agent_events,
             cancel_agent,
             submit_confirmation,
