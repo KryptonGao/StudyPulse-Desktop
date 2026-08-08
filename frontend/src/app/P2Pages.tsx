@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { core, chooseReportExportPath } from "../lib/core";
 import { useI18n } from "../i18n";
 import type {
-  AppSnapshot, CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal,
+  AiFeatureCaller, AppSnapshot, CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal,
   CoachProposal, CoachProposalItem, DailyExamTask, ExamGoal, ExamPlan, ExamQuestion,
   ExamQuestionRecord, ExamRoleAnalysis, ExamSimulation, ExamSimulationEvent, LearningReport,
 } from "../types";
@@ -25,45 +25,31 @@ function providerReady(provider: Provider): boolean {
   return Boolean(provider?.cloud_account || provider?.byok_config);
 }
 
-function parseJson(raw: string): Record<string, unknown> {
-  // Models may wrap JSON in a Markdown fence. This strips only that wrapper,
-  // then validates the outer value before feature-specific field extraction.
-  const trimmed = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("The model returned no JSON object.");
-  const value: unknown = JSON.parse(trimmed.slice(start, end + 1));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("The model returned an invalid JSON object.");
-  return value as Record<string, unknown>;
-}
+type CoachFeatureOutput = {
+  conclusion: string;
+  rationale: string;
+  shouldContinue: boolean;
+  decision: string;
+  weightedPredicted: number;
+  weightedLowerBound: number;
+  weightedUpperBound: number;
+  successProbability: number;
+  predictions: CoachAnalysis["predictions"];
+  risks: CoachAnalysis["risks"];
+  evidence: CoachAnalysis["evidence"];
+  items: CoachProposalItem[];
+  alternative: string | null;
+};
 
-function stringValue(value: unknown, fallback = ""): string { return typeof value === "string" ? value : fallback; }
-function numberValue(value: unknown, fallback = 0): number { return typeof value === "number" && Number.isFinite(value) ? value : fallback; }
-function arrayValue(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
+type PlannerFeatureOutput = Omit<ExamPlan, "id" | "examGoalId" | "createdAt">;
+type ExamGradeFeatureOutput = { totalScore: number; analysis: ExamRoleAnalysis; questionResults: Array<{ questionId: string; isCorrect: boolean; score: number; feedback: string }> };
 
-async function runAgent(mode: "Coach" | "ExamSimulation" | "ReversePlanner" | "Chat", goal: string, provider: Provider): Promise<string> {
-  // P2 runs use the same Core timeline as the main Agent page, but this helper
-  // only needs text and terminal/error handling for a single feature request.
+async function runFeature<T>(caller: AiFeatureCaller, context: unknown, provider: Provider): Promise<T> {
+  // Core owns the prompt, schema, cache, stale-result, and event lifecycle.
+  // React only provides bounded structured context and renders the result.
   if (!providerReady(provider)) throw new Error("Connect Cloud AI or BYOK in Settings before using this feature.");
-  const runId = await core.startAgent({ mode, goal, sourcePaths: [], history: [] });
-  // `afterSequence` is a monotonic event cursor, not the number of events in a
-  // returned batch; this remains correct when a wait call returns no events.
-  let cursor = 0;
-  let answer = "";
-  let finished = false;
-  while (!finished) {
-    const events = await core.waitAgentEvents(runId, cursor, 1000);
-    for (const event of events) {
-      cursor = Math.max(cursor, event.sequence);
-      if (event.kind === "TextDelta") answer += event.text ?? "";
-      if (event.kind === "Failed") throw new Error(event.text || "Agent failed.");
-      // Failed is raised immediately; Cancelled and Completed are terminal
-      // states, while text deltas may arrive in any non-terminal batch.
-      if (["Cancelled", "Completed"].includes(event.kind)) finished = true;
-    }
-  }
-  if (!answer.trim()) throw new Error("The model returned an empty response.");
-  return answer;
+  const result = await core.runAiFeature<T>({ caller, context });
+  return result.output;
 }
 
 function saveMessage(goalId: string, chat: CoachChat | undefined, role: string, content: string): { chat: CoachChat; message: CoachConversationMessage } {
@@ -108,17 +94,15 @@ export function CoachPage({ provider }: { provider: Provider }) {
   }
 
   async function generate() {
-    // The model response is treated as untrusted JSON and normalized into the
-    // typed proposal/analysis records before either is persisted.
+    // Core returns a schema-validated preview. Persistence still happens as
+    // two local records, while proposal approval remains the write boundary.
     if (!goal) return;
     setBusy(true);
     try {
-      const raw = await runAgent("Coach", `You are StudyPulse AI Coach. Analyze this goal and propose reviewable tasks. Return JSON only with keys: conclusion, rationale, shouldContinue, decision, weightedPredicted, weightedLowerBound, weightedUpperBound, successProbability, predictions, risks, evidence, items, alternative. Each item must have id, title, subject, startDate (ISO), objective, stopCondition, importance 1-5. Goal: ${JSON.stringify(goal)}`, provider);
-      const value = parseJson(raw);
+      const value = await runFeature<CoachFeatureOutput>("Coach", { goal }, provider);
       const now = new Date().toISOString();
-      const items: CoachProposalItem[] = arrayValue(value.items).map((item) => { const row = item as Record<string, unknown>; return { id: stringValue(row.id, crypto.randomUUID()), title: stringValue(row.title, "Study task"), subject: stringValue(row.subject, goal.subjects[0]?.subject), startDate: stringValue(row.startDate, now), objective: stringValue(row.objective), stopCondition: stringValue(row.stopCondition), importance: Math.max(1, Math.min(5, Math.round(numberValue(row.importance, 3)))) }; });
-      const nextAnalysis: CoachAnalysis = { id: crypto.randomUUID(), goalId: goal.id, goalVersion: goal.version, calculatedAt: now, decision: stringValue(value.decision, value.shouldContinue === false ? "notFeasible" : "continueGoal"), weightedPredicted: numberValue(value.weightedPredicted), weightedLowerBound: numberValue(value.weightedLowerBound), weightedUpperBound: numberValue(value.weightedUpperBound), successProbability: Math.max(0, Math.min(1, numberValue(value.successProbability))), predictions: arrayValue(value.predictions) as CoachAnalysis["predictions"], risks: arrayValue(value.risks) as CoachAnalysis["risks"], evidence: arrayValue(value.evidence) as CoachAnalysis["evidence"], dataFingerprint: "desktop-agent" };
-      const nextProposal: CoachProposal = { id: crypto.randomUUID(), goalId: goal.id, goalVersion: goal.version, analysisId: nextAnalysis.id, conclusion: stringValue(value.conclusion), rationale: stringValue(value.rationale), items, status: "pending", createdAt: now, expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(), resolvedAt: null, failureReason: null, alternative: value.alternative ? stringValue(value.alternative) : null };
+      const nextAnalysis: CoachAnalysis = { id: crypto.randomUUID(), goalId: goal.id, goalVersion: goal.version, calculatedAt: now, decision: value.decision, weightedPredicted: value.weightedPredicted, weightedLowerBound: value.weightedLowerBound, weightedUpperBound: value.weightedUpperBound, successProbability: value.successProbability, predictions: value.predictions, risks: value.risks, evidence: value.evidence, dataFingerprint: "core-ai-caller-v1" };
+      const nextProposal: CoachProposal = { id: crypto.randomUUID(), goalId: goal.id, goalVersion: goal.version, analysisId: nextAnalysis.id, conclusion: value.conclusion, rationale: value.rationale, items: value.items, status: "pending", createdAt: now, expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(), resolvedAt: null, failureReason: null, alternative: value.alternative };
       await core.upsertCoachAnalysis(nextAnalysis); await core.upsertCoachProposal(nextProposal); await queryClient.invalidateQueries({ queryKey: ["coach-data"] });
     } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
   }
@@ -134,7 +118,7 @@ export function CoachPage({ provider }: { provider: Provider }) {
   async function sendChat() {
     if (!goal || !chatInput.trim()) return;
     const input = chatInput.trim(); setChatInput(""); setBusy(true);
-    try { const prompt = `Respond as a supportive study coach. Goal: ${JSON.stringify(goal)}\nStudent: ${input}`; const answer = await runAgent("Chat", prompt, provider); const user = saveMessage(goal.id, chat, "user", input); const assistant = saveMessage(goal.id, user.chat, "assistant", answer); await core.upsertCoachChat(user.chat); await core.upsertCoachMessage(user.message); await core.upsertCoachMessage(assistant.message); await queryClient.invalidateQueries({ queryKey: ["coach-data"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
+    try { const answer = await runFeature<string>("Chat", { goal, message: input }, provider); const user = saveMessage(goal.id, chat, "user", input); const assistant = saveMessage(goal.id, user.chat, "assistant", answer); await core.upsertCoachChat(user.chat); await core.upsertCoachMessage(user.message); await core.upsertCoachMessage(assistant.message); await queryClient.invalidateQueries({ queryKey: ["coach-data"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
   }
 
   if (query.isLoading) return <div className="page-content"><div className="skeleton-card" /><div className="skeleton-card short" /></div>;
@@ -147,21 +131,22 @@ export function ReversePlannerPage({ provider }: { provider: Provider }) {
   const { t } = useI18n(); const queryClient = useQueryClient();
   const goals = useQuery({ queryKey: ["exam-goals"], queryFn: core.examGoals }); const plans = useQuery({ queryKey: ["exam-plans"], queryFn: core.examPlans });
   const grades = useQuery({ queryKey: ["grades"], queryFn: core.grades }); const mistakes = useQuery({ queryKey: ["mistakes"], queryFn: core.mistakes }); const dueMistakes = useQuery({ queryKey: ["due-mistakes"], queryFn: core.dueMistakes }); const tasks = useQuery({ queryKey: ["tasks"], queryFn: core.tasks });
-  const [examName, setExamName] = useState(""); const [subject, setSubject] = useState(""); const [examDate, setExamDate] = useState(""); const [current, setCurrent] = useState(60); const [target, setTarget] = useState(80); const [full, setFull] = useState(100); const [busy, setBusy] = useState(false);
+  const [examName, setExamName] = useState(""); const [subject, setSubject] = useState(""); const [examDate, setExamDate] = useState(""); const [current, setCurrent] = useState(60); const [target, setTarget] = useState(80); const [full, setFull] = useState(100); const [busy, setBusy] = useState(false); const [draftPlan, setDraftPlan] = useState<ExamPlan>();
   // The planner presents the first saved goal and its matching plan; all
   // supporting grades/mistakes/tasks are read-only context for generation.
-  const goal = goals.data?.[0]; const plan = plans.data?.find((value) => value.examGoalId === goal?.id);
+  const goal = goals.data?.[0]; const plan = plans.data?.find((value) => value.examGoalId === goal?.id); const visiblePlan = draftPlan ?? plan;
   async function generate() {
-    // Context is bounded before serialization so a prompt cannot expand with
-    // the full local history; the returned plan is still persisted locally.
+    // Context is bounded before crossing the Core caller boundary. The result
+    // remains a local preview until the explicit Save plan action.
     if (!goal) return; setBusy(true);
-    try { const context = { goal, grades: (grades.data ?? []).slice(-15), mistakes: (mistakes.data ?? []).slice(-30).map((value) => ({ subject: value.subject, tags: value.tags, mastery: value.mastery_score })), srsQueue: { overdue: dueMistakes.data?.length ?? 0, total: mistakes.data?.length ?? 0 }, openTasks: (tasks.data ?? []).filter((value) => !value.is_completed).slice(0, 30) }; const raw = await runAgent("ReversePlanner", `Build a reverse plan. Return JSON only with improvementTarget, summary, weakPoints, phases, dailyTasks, modelInfo. Context: ${JSON.stringify(context)}`, provider); const value = parseJson(raw); const planValue: ExamPlan = { id: crypto.randomUUID(), examGoalId: goal.id, improvementTarget: numberValue(value.improvementTarget, goal.targetScore - goal.currentScore), summary: stringValue(value.summary), weakPoints: arrayValue(value.weakPoints) as ExamPlan["weakPoints"], phases: arrayValue(value.phases) as ExamPlan["phases"], dailyTasks: arrayValue(value.dailyTasks) as ExamPlan["dailyTasks"], modelInfo: stringValue(value.modelInfo, "Agent"), createdAt: new Date().toISOString() }; await core.upsertExamPlan(planValue); await queryClient.invalidateQueries({ queryKey: ["exam-plans"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
+    try { const context = { goal, grades: (grades.data ?? []).slice(-15), mistakes: (mistakes.data ?? []).slice(-30).map((value) => ({ subject: value.subject, tags: value.tags, mastery: value.mastery_score })), srsQueue: { overdue: dueMistakes.data?.length ?? 0, total: mistakes.data?.length ?? 0 }, openTasks: (tasks.data ?? []).filter((value) => !value.is_completed).slice(0, 30) }; const value = await runFeature<PlannerFeatureOutput>("ReversePlanner", context, provider); const planValue: ExamPlan = { id: crypto.randomUUID(), examGoalId: goal.id, improvementTarget: value.improvementTarget, summary: value.summary, weakPoints: value.weakPoints, phases: value.phases, dailyTasks: value.dailyTasks, modelInfo: value.modelInfo, createdAt: new Date().toISOString() }; setDraftPlan(planValue); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
   }
+  async function savePlan() { if (!draftPlan) return; setBusy(true); try { await core.upsertExamPlan(draftPlan); setDraftPlan(undefined); await queryClient.invalidateQueries({ queryKey: ["exam-plans"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); } }
   async function saveGoal() { if (!examName.trim() || !subject.trim() || !examDate) return; setBusy(true); const value: ExamGoal = { id: crypto.randomUUID(), examName: examName.trim(), subject: subject.trim(), examDate: new Date(`${examDate}T09:00:00`).toISOString(), currentScore: current, targetScore: target, fullScore: full, phaseId: null, createdAt: new Date().toISOString() }; try { await core.upsertExamGoal(value); await queryClient.invalidateQueries({ queryKey: ["exam-goals"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); } }
   async function removeGoal() { if (!goal || !window.confirm(t("planner.confirmDelete"))) return; try { await core.deleteExamGoal(goal.id); await queryClient.invalidateQueries({ queryKey: ["exam-goals"] }); } catch (error) { window.alert(errorText(error)); } }
   if (goals.isLoading || plans.isLoading) return <div className="page-content"><div className="skeleton-card" /></div>;
   if (!providerReady(provider)) return <div className="page-content"><section className="panel feature-empty"><h2>{t("planner.title")}</h2><p>{t("feature.providerRequired")}</p></section></div>;
-  return <div className="page-content feature-page"><section className="panel"><div className="section-header"><div><h2>{t("planner.title")}</h2><p className="muted">{t("planner.description")}</p></div></div><div className="form-grid feature-form"><input value={examName} onChange={(event) => setExamName(event.target.value)} placeholder={t("planner.examName")} /><input value={subject} onChange={(event) => setSubject(event.target.value)} placeholder={t("coach.subject")} /><input type="date" value={examDate} onChange={(event) => setExamDate(event.target.value)} /><input type="number" value={current} onChange={(event) => setCurrent(Number(event.target.value))} placeholder={t("planner.currentScore")} /><input type="number" value={target} onChange={(event) => setTarget(Number(event.target.value))} placeholder={t("planner.targetScore")} /><input type="number" value={full} onChange={(event) => setFull(Number(event.target.value))} placeholder={t("coach.fullScore")} /><button className="button primary" onClick={() => void saveGoal()} disabled={busy}>{t("planner.saveGoal")}</button></div></section>{goal ? <section className="panel"><div className="section-header"><div><h3>{goal.examName}</h3><p className="muted">{goal.subject} · {goal.currentScore}/{goal.fullScore} → {goal.targetScore}</p></div><div className="button-row"><button className="button subtle" onClick={() => void removeGoal()}>{t("planner.delete")}</button><button className="button primary" onClick={() => void generate()} disabled={busy}>{busy ? t("feature.working") : t("planner.generate")}</button></div></div>{plan ? <><p>{plan.summary}</p><div className="two-column"><div><h4>{t("planner.weakPoints")}</h4><div className="compact-list">{plan.weakPoints.map((value) => <div className="compact-row" key={value.id}><strong>{value.topic}</strong><span>{Math.round(value.mastery <= 1 ? value.mastery * 100 : value.mastery)}% · +{value.possibleScoreGain}</span></div>)}</div></div><div><h4>{t("planner.dailyTasks")}</h4><div className="compact-list">{plan.dailyTasks.map((value: DailyExamTask) => <div className="compact-row" key={value.id}><div><strong>{value.taskTitle}</strong><span>{value.date} · {value.subject}</span></div><span>{value.durationMinutes}m</span></div>)}</div></div></div></> : <div className="feature-empty"><p>{t("planner.empty")}</p></div>}</section> : <div className="panel"><div className="feature-empty"><h3>{t("planner.noGoal")}</h3><p>{t("planner.noGoalCopy")}</p></div></div>}</div>;
+  return <div className="page-content feature-page"><section className="panel"><div className="section-header"><div><h2>{t("planner.title")}</h2><p className="muted">{t("planner.description")}</p></div></div><div className="form-grid feature-form"><input value={examName} onChange={(event) => setExamName(event.target.value)} placeholder={t("planner.examName")} /><input value={subject} onChange={(event) => setSubject(event.target.value)} placeholder={t("coach.subject")} /><input type="date" value={examDate} onChange={(event) => setExamDate(event.target.value)} /><input type="number" value={current} onChange={(event) => setCurrent(Number(event.target.value))} placeholder={t("planner.currentScore")} /><input type="number" value={target} onChange={(event) => setTarget(Number(event.target.value))} placeholder={t("planner.targetScore")} /><input type="number" value={full} onChange={(event) => setFull(Number(event.target.value))} placeholder={t("coach.fullScore")} /><button className="button primary" onClick={() => void saveGoal()} disabled={busy}>{t("planner.saveGoal")}</button></div></section>{goal ? <section className="panel"><div className="section-header"><div><h3>{goal.examName}</h3><p className="muted">{goal.subject} · {goal.currentScore}/{goal.fullScore} → {goal.targetScore}</p></div><div className="button-row"><button className="button subtle" onClick={() => void removeGoal()}>{t("planner.delete")}</button><button className="button primary" onClick={() => void generate()} disabled={busy}>{busy ? t("feature.working") : t("planner.generate")}</button>{draftPlan && <button className="button secondary" onClick={() => void savePlan()} disabled={busy}>{t("planner.savePlan")}</button>}</div></div>{visiblePlan ? <><p>{visiblePlan.summary}</p><div className="two-column"><div><h4>{t("planner.weakPoints")}</h4><div className="compact-list">{visiblePlan.weakPoints.map((value) => <div className="compact-row" key={value.id}><strong>{value.topic}</strong><span>{Math.round(value.mastery <= 1 ? value.mastery * 100 : value.mastery)}% · +{value.possibleScoreGain}</span></div>)}</div></div><div><h4>{t("planner.dailyTasks")}</h4><div className="compact-list">{visiblePlan.dailyTasks.map((value: DailyExamTask) => <div className="compact-row" key={value.id}><div><strong>{value.taskTitle}</strong><span>{value.date} · {value.subject}</span></div><span>{value.durationMinutes}m</span></div>)}</div></div></div></> : <div className="feature-empty"><p>{t("planner.empty")}</p></div>}</section> : <div className="panel"><div className="feature-empty"><h3>{t("planner.noGoal")}</h3><p>{t("planner.noGoalCopy")}</p></div></div>}</div>;
 }
 
 function blankRecord(questionId: string): ExamQuestionRecord { return { questionId, firstViewedAt: null, lastViewedAt: null, totalViewSeconds: 0, visitCount: 0, skipCount: 0, answerChangeCount: 0, firstAnswer: null, finalAnswer: null, submittedAt: null, isCorrect: null, score: null }; }
@@ -177,16 +162,16 @@ export function ExamSimulationPage({ provider }: { provider: Provider }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (!simulation || simulation.status !== "running" || !simulation.startedAt) return; const tick = () => { const left = Math.max(0, simulation.durationSeconds - Math.floor((Date.now() - Date.parse(simulation.startedAt!)) / 1000)); setRemaining(left); if (left === 0) void submit(true); }; tick(); const timer = window.setInterval(tick, 1000); return () => window.clearInterval(timer); }, [simulation]);
   async function generate() {
-    // The exact ten-question check protects the simulation state machine from a
-    // partial model response before any generated record is saved.
+    // Core enforces the exact ten-question schema before any generated record
+    // is saved to the local simulation draft.
     if (!subject.trim()) return; setBusy(true);
-    try { const raw = await runAgent("ExamSimulation", `Generate exactly 10 exam questions for ${subject}. Use multipleChoice and freeResponse. Return JSON only: {"questions":[{"id":"uuid","kind":"multipleChoice|freeResponse","prompt":"...","options":[],"correctAnswer":null,"explanation":"","points":10}]}.`, provider); const value = parseJson(raw); const questions = arrayValue(value.questions) as ExamQuestion[]; if (questions.length !== 10) throw new Error("The simulator requires exactly 10 questions."); const next = await core.newExamSimulation(subject.trim()); const created: ExamSimulation = { ...next, questions, questionRecords: questions.map((item) => blankRecord(item.id)) }; await core.upsertExamSimulation(created); setSelectedId(created.id); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
+    try { const value = await runFeature<{ questions: ExamQuestion[] }>("ExamSimulation", { kind: "generate", subject: subject.trim() }, provider); const next = await core.newExamSimulation(subject.trim()); const created: ExamSimulation = { ...next, questions: value.questions, questionRecords: value.questions.map((item) => blankRecord(item.id)) }; await core.upsertExamSimulation(created); setSelectedId(created.id); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
   }
   async function start() { if (!simulation) return; const now = new Date().toISOString(); const next = { ...simulation, status: "running" as const, startedAt: simulation.startedAt ?? now, questionRecords: simulation.questionRecords.length ? simulation.questionRecords : simulation.questions.map((item) => blankRecord(item.id)), events: [...simulation.events, event("started", simulation, null, null, null, simulation.durationSeconds)] }; try { await core.upsertExamSimulation(next); setRemaining(next.durationSeconds); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { window.alert(errorText(error)); } }
   async function answer(value: string) { if (!simulation || !question || simulation.status !== "running") return; const now = new Date().toISOString(); const records = simulation.questionRecords.map((item) => item.questionId === question.id ? { ...item, firstViewedAt: item.firstViewedAt ?? now, lastViewedAt: now, visitCount: Math.max(1, item.visitCount), firstAnswer: item.firstAnswer ?? value, finalAnswer: value, answerChangeCount: item.finalAnswer && item.finalAnswer !== value ? item.answerChangeCount + 1 : item.answerChangeCount } : item); const next = { ...simulation, questionRecords: records, events: [...simulation.events, event("answerChanged", simulation, question.id, index, value, remaining)] }; try { await core.upsertExamSimulation(next); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { window.alert(errorText(error)); } }
   // Submission persists `grading` first, then records either the completed
   // analysis or an `analysisFailed` snapshot so a model failure is recoverable.
-  async function submit(timedOut = false) { if (!simulation || busy) return; setBusy(true); const now = new Date().toISOString(); const prepared = { ...simulation, status: "grading" as const, endedAt: now, events: [...simulation.events, event(timedOut ? "timedOut" : "submitted", simulation, question?.id ?? null, question ? index : null, record?.finalAnswer ?? null, remaining)] }; try { await core.upsertExamSimulation(prepared); const raw = await runAgent("ExamSimulation", `Grade this completed simulation. Return JSON only with totalScore, analysis (role, confidence, evidence, risk, strategies, isStable, generatedAt), and questionResults. Free responses require model grading. Simulation: ${JSON.stringify(prepared)}`, provider); const value = parseJson(raw); const analysis = value.analysis as ExamRoleAnalysis; const result = { ...prepared, status: "completed" as const, totalScore: numberValue(value.totalScore), analysis, questionRecords: prepared.questionRecords.map((item) => { const found = arrayValue(value.questionResults).find((row) => (row as Record<string, unknown>).questionId === item.questionId) as Record<string, unknown> | undefined; return found ? { ...item, isCorrect: Boolean(found.isCorrect), score: numberValue(found.score), submittedAt: now } : item; }) }; await core.upsertExamSimulation(result); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { const failed = { ...prepared, status: "analysisFailed" as const, lastError: errorText(error) }; try { await core.upsertExamSimulation(failed); } catch { /* preserve the original error */ } window.alert(errorText(error)); } finally { setBusy(false); } }
+  async function submit(timedOut = false) { if (!simulation || busy) return; setBusy(true); const now = new Date().toISOString(); const prepared = { ...simulation, status: "grading" as const, endedAt: now, events: [...simulation.events, event(timedOut ? "timedOut" : "submitted", simulation, question?.id ?? null, question ? index : null, record?.finalAnswer ?? null, remaining)] }; try { await core.upsertExamSimulation(prepared); const value = await runFeature<ExamGradeFeatureOutput>("ExamSimulation", { kind: "grade", simulation: prepared }, provider); const result = { ...prepared, status: "completed" as const, totalScore: value.totalScore, analysis: value.analysis, questionRecords: prepared.questionRecords.map((item) => { const found = value.questionResults.find((row) => row.questionId === item.questionId); return found ? { ...item, isCorrect: found.isCorrect, score: found.score, submittedAt: now } : item; }) }; await core.upsertExamSimulation(result); await queryClient.invalidateQueries({ queryKey: ["exam-simulations"] }); } catch (error) { const failed = { ...prepared, status: "analysisFailed" as const, lastError: errorText(error) }; try { await core.upsertExamSimulation(failed); } catch { /* preserve the original error */ } window.alert(errorText(error)); } finally { setBusy(false); } }
   if (query.isLoading) return <div className="page-content"><div className="skeleton-card" /></div>;
   if (!providerReady(provider)) return <div className="page-content"><section className="panel feature-empty"><h2>{t("simulation.title")}</h2><p>{t("feature.providerRequired")}</p></section></div>;
   return <div className="page-content feature-page"><section className="panel"><div className="section-header"><div><h2>{t("simulation.title")}</h2><p className="muted">{t("simulation.description")}</p></div><div className="inline-form"><input value={subject} onChange={(event) => setSubject(event.target.value)} placeholder={t("coach.subject")} /><button className="button primary" onClick={() => void generate()} disabled={busy}>{busy ? t("feature.working") : t("simulation.generate")}</button></div></div>{query.data?.length ? <div className="compact-list">{query.data.map((value) => <button className={`simulation-row ${simulation?.id === value.id ? "active" : ""}`} key={value.id} onClick={() => { setSelectedId(value.id); setIndex(0); }}>{value.subject}<span>{value.status} · {value.questions.length} {t("simulation.questions")}</span></button>)}</div> : <div className="feature-empty"><p>{t("simulation.empty")}</p></div>}</section>{simulation && <section className="panel simulation-panel"><div className="section-header"><div><h3>{simulation.subject}</h3><p className="muted">{simulation.status} · {simulation.questions.length} {t("simulation.questions")}</p></div><div className="timer-badge">{Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, "0")}</div></div>{question && simulation.status === "running" ? <div className="question-card"><span className="eyebrow">{index + 1} / {simulation.questions.length} · {question.kind}</span><h3>{question.prompt}</h3>{question.kind === "multipleChoice" ? <div className="option-list">{question.options.map((option) => <button className={`option ${record?.finalAnswer === option ? "selected" : ""}`} key={option} onClick={() => void answer(option)}>{option}</button>)}</div> : <textarea value={record?.finalAnswer ?? ""} onChange={(event) => void answer(event.target.value)} placeholder={t("simulation.answerPlaceholder")} /> }<div className="button-row"><button className="button subtle" onClick={() => setIndex(Math.max(0, index - 1))} disabled={index === 0}>{t("simulation.previous")}</button><button className="button secondary" onClick={() => setIndex(Math.min(simulation.questions.length - 1, index + 1))} disabled={index === simulation.questions.length - 1}>{t("simulation.next")}</button><button className="button primary" onClick={() => void submit()} disabled={busy}>{busy ? t("feature.working") : t("simulation.submit")}</button></div></div> : <div className="feature-empty"><h3>{simulation.status === "completed" ? `${t("simulation.score")}: ${simulation.totalScore ?? "—"}` : t("simulation.resume")}</h3>{simulation.analysis && <p>{simulation.analysis.risk}</p>}<button className="button primary" onClick={() => void start()} disabled={simulation.status === "completed" || simulation.status === "grading" || busy}>{simulation.status === "preparing" ? t("simulation.start") : t("simulation.resume")}</button></div>}</section>}</div>;

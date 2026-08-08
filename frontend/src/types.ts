@@ -75,6 +75,32 @@ export interface AppSnapshot {
   provider: ProviderStatus;
 }
 
+export type AiFeatureCaller = "Coach" | "ReversePlanner" | "ExamSimulation" | "Chat";
+
+export interface AiAttachment {
+  kind: "image";
+  sourcePath?: string;
+  dataBase64: string;
+}
+
+export interface AiFeatureDiagnostics {
+  request_id: string;
+  caller: AiFeatureCaller;
+  duration_ms: number;
+  cache_hit: boolean;
+  stale_result: boolean;
+  outcome: "success" | "cache" | "stale" | "failed" | string;
+  error_code: string | null;
+}
+
+export interface AiFeatureResult<T> {
+  schema_version: number;
+  request_id: string;
+  caller: AiFeatureCaller;
+  output: T;
+  diagnostics: AiFeatureDiagnostics;
+}
+
 // Local records preserve the Rust DTO field names here. `extra_json` carries
 // forward-compatible fields that the current frontend does not interpret.
 export interface Task {
