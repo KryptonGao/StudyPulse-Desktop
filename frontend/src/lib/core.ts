@@ -6,10 +6,6 @@ import type {
   AgentMessage,
   AgentMode,
   AgentNotebook,
-  AiAttachment,
-  AiFeatureCaller,
-  AiFeatureDiagnostics,
-  AiFeatureResult,
   AppSnapshot,
   BackupInspection,
   DiaryEntry,
@@ -126,21 +122,6 @@ export const core = {
   // owns tool permissions, confirmations, and event persistence.
   startAgent: (input: { mode: AgentMode; goal: string; sourcePaths: string[]; history: AgentMessage[] }) =>
     command<string>("start_agent", { input: { mode: input.mode, goal: input.goal, source_paths: input.sourcePaths, history: input.history } }),
-  runAiFeature: async <T>(input: { caller: AiFeatureCaller; context: unknown; sourcePaths?: string[]; history?: AgentMessage[]; attachments?: AiAttachment[] }) =>
-    JSON.parse(await command<string>("run_ai_feature", {
-      request: {
-        caller: input.caller,
-        input_json: JSON.stringify(input.context),
-        source_paths: input.sourcePaths ?? [],
-        history: input.history ?? [],
-        attachments: (input.attachments ?? []).map((attachment) => ({
-          kind: attachment.kind,
-          source_path: attachment.sourcePath ?? null,
-          data_base64: attachment.dataBase64,
-        })),
-      },
-    })) as AiFeatureResult<T>,
-  aiDiagnostics: async (): Promise<AiFeatureDiagnostics[]> => JSON.parse(await command<string>("get_ai_diagnostics")) as AiFeatureDiagnostics[],
   // `afterSequence` is the last observed monotonic event sequence. Core returns
   // only newer events, so callers must advance it with event.sequence.
   waitAgentEvents: (runId: string, afterSequence: number, timeoutMs = 1000) =>
