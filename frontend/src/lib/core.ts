@@ -239,7 +239,7 @@ export const core = {
       archive_path: archivePath,
       includes_media: true,
       includes_derived_health_data: true,
-      app_version: "0.5.1",
+      app_version: "0.7.0",
       app_build: "local",
       locale,
     },

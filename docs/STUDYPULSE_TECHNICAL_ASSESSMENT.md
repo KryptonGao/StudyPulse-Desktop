@@ -205,7 +205,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 #### 4.2.1 备份版本信息未跟随应用版本
 
-当前应用版本已经是 `0.6.0`，且以下版本持有者一致：
+当前应用版本已经是 `0.7.0`，且以下版本持有者一致：
 
 - `package.json`
 - `package-lock.json`
@@ -213,7 +213,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
 
-但是前端备份导出仍传递：
+评估时，前端备份导出仍传递：
 
 ```ts
 app_version: "0.5.1"
@@ -221,11 +221,11 @@ app_version: "0.5.1"
 
 参考：`frontend/src/lib/core.ts:242`
 
-这不是立即的远程安全漏洞，但会导致备份元数据、诊断和兼容性判断不准确，属于发布数据契约问题。
+这不是立即的远程安全漏洞，但会导致备份元数据、诊断和兼容性判断不准确，属于发布数据契约问题。本次版本同步已将其更新为 `0.7.0`。
 
 #### 4.2.2 README 版本信息过期
 
-README 当前仍包含 `0.5.0` 版本元数据，而应用和构建配置已经是 `0.6.0`。
+版本同步前 README 曾包含 `0.5.0` 版本元数据，而应用和构建配置已经是 `0.7.0`。
 
 参考：`README.md:183`
 
@@ -592,7 +592,7 @@ README 和 Release Template 都明确说明当前产物未进行 Developer ID �
 | ID | 风险 | 级别 | 当前状态 | 建议措施 |
 |---|---|---|---|---|
 | SEC-03 | 报告导出目标可能跟随符号链接 | 中 | 未修复 | 使用 `create_new`/`symlink_metadata`/目标重检 |
-| DATA-01 | 备份版本硬编码为 0.5.1 | 中 | 已确认 | 从统一构建版本注入，不允许页面硬编码 |
+| DATA-01 | 备份版本曾硬编码为 0.5.1 | 中 | 已修复为 0.7.0 | 后续从统一构建版本注入，不允许页面硬编码 |
 | DATA-02 | 偏好写入非原子 | 中 | 已确认 | 复用统一 atomic write helper |
 | REL-01 | CI 缺少 Rust 门禁和 PR workflow | 中 | 已确认 | 增加独立 `ci.yml`，Release 依赖 CI 结果 |
 | I18N-01 | P2 文案未覆盖五种语言 | 中 | 已确认 | 完善字典并添加 key parity 测试 |
@@ -603,7 +603,7 @@ README 和 Release Template 都明确说明当前产物未进行 Developer ID �
 | ID | 风险 | 级别 | 当前状态 | 建议措施 |
 |---|---|---|---|---|
 | SEC-04 | CSP 含 `unsafe-eval` | 低/中 | 待确认 | 生产配置中移除不必要的 eval |
-| DOC-01 | README 与当前版本不一致 | 低 | 已确认 | 发布时自动生成或校验文档版本 |
+| DOC-01 | README 与当前版本不一致 | 低 | 已修复为 0.7.0 | 发布时自动生成或校验文档版本 |
 | SUP-01 | GitHub Actions 使用浮动 tag | 低/中 | 已确认 | 固定到 commit SHA，并定期升级 |
 | SUP-02 | 未配置 Dependabot、CodeQL 或 cargo audit | 低/中 | 未发现配置 | 增加持续依赖和供应链扫描 |
 
