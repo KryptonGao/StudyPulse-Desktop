@@ -1,4 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="workflow-title workflow-desc">
+  <!-- Chinese artwork -->
   <title id="workflow-title">StudyPulse architecture and data boundary</title>
   <desc id="workflow-desc">React sends commands through the Tauri host to the Rust Core. The Core writes to the local Workspace and can optionally connect to Cloud AI or an OpenAI-compatible BYOK endpoint.</desc>
 
@@ -14,31 +15,31 @@
   <rect width="1200" height="500" rx="30" fill="#242521"/>
   <path d="M64 108h1072" stroke="#4c4c43" stroke-width="1"/>
   <text x="64" y="54" fill="#b6d4b5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700" letter-spacing="2.4">THE STUDYPULSE BOUNDARY</text>
-  <text x="64" y="92" fill="#eee9df" font-family="Georgia, 'Songti SC', serif" font-size="40" font-weight="500">Record → Understand → Act</text>
-  <text x="818" y="68" fill="#aaa69a" font-family="Georgia, serif" font-size="17">Local by default. You choose what connects.</text>
+  <text x="64" y="92" fill="#eee9df" font-family="Georgia, 'Songti SC', serif" font-size="40" font-weight="500">记录 → 看见 → 行动</text>
+  <text x="818" y="68" fill="#aaa69a" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">默认留在本地，连接由你决定。</text>
 
   <g id="react-ui" transform="translate(64 156)">
     <rect width="204" height="180" rx="18" fill="#2e302b" stroke="#4c4c43" stroke-width="1.5"/>
     <text x="22" y="36" fill="#b6d4b5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">01 / UI</text>
     <text x="22" y="84" fill="#eee9df" font-family="Georgia, 'Songti SC', serif" font-size="30">React</text>
-    <text x="22" y="116" fill="#aaa69a" font-family="Georgia, serif" font-size="17">Tasks, diary, trends</text>
-    <text x="22" y="143" fill="#aaa69a" font-family="Georgia, serif" font-size="17">Library and Agent</text>
+    <text x="22" y="116" fill="#aaa69a" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">任务、日记、趋势</text>
+    <text x="22" y="143" fill="#aaa69a" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">资料库与 Agent</text>
   </g>
 
   <g id="tauri-host" transform="translate(316 156)">
     <rect width="204" height="180" rx="18" fill="#2e302b" stroke="#4c4c43" stroke-width="1.5"/>
     <text x="22" y="36" fill="#b6d4b5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">02 / HOST</text>
     <text x="22" y="84" fill="#eee9df" font-family="Georgia, 'Songti SC', serif" font-size="30">Tauri</text>
-    <text x="22" y="116" fill="#aaa69a" font-family="Georgia, serif" font-size="17">Command boundary</text>
-    <text x="22" y="143" fill="#aaa69a" font-family="Georgia, serif" font-size="17">Credentials and deep links</text>
+    <text x="22" y="116" fill="#aaa69a" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">命令边界</text>
+    <text x="22" y="143" fill="#aaa69a" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">系统凭据与深链</text>
   </g>
 
   <g id="rust-core" transform="translate(568 156)">
     <rect width="204" height="180" rx="18" fill="#364137" stroke="#96b398" stroke-width="2"/>
     <text x="22" y="36" fill="#d7e5d1" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700">03 / CORE</text>
     <text x="22" y="84" fill="#f5f2ea" font-family="Georgia, 'Songti SC', serif" font-size="30">Rust Core</text>
-    <text x="22" y="116" fill="#d7e5d1" font-family="Georgia, serif" font-size="17">Workspace · SRS</text>
-    <text x="22" y="143" fill="#d7e5d1" font-family="Georgia, serif" font-size="17">Agent · Backup</text>
+    <text x="22" y="116" fill="#d7e5d1" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">Workspace · SRS</text>
+    <text x="22" y="143" fill="#d7e5d1" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">Agent · Backup</text>
   </g>
 
   <g id="local-workspace" transform="translate(820 156)">
@@ -53,8 +54,8 @@
     <rect width="76" height="180" rx="18" fill="#3b302d" stroke="#dc9b82" stroke-width="1.5"/>
     <text x="18" y="36" fill="#dc9b82" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" font-weight="700">OPT.</text>
     <text x="18" y="84" fill="#f4d8cc" font-family="Georgia, serif" font-size="25">AI</text>
-    <text x="18" y="116" fill="#e5b9a9" font-family="Georgia, serif" font-size="16">Cloud</text>
-    <text x="18" y="143" fill="#e5b9a9" font-family="Georgia, serif" font-size="16">BYOK</text>
+    <text x="18" y="116" fill="#e5b9a9" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="16">Cloud</text>
+    <text x="18" y="143" fill="#e5b9a9" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="16">BYOK</text>
   </g>
 
   <path d="M274 246h32" stroke="#96b398" stroke-width="3" marker-end="url(#arrow)"/>
@@ -64,8 +65,8 @@
 
   <g transform="translate(64 398)">
     <circle cx="8" cy="0" r="6" fill="#96b398"/>
-    <text x="25" y="6" fill="#d7e5d1" font-family="Georgia, serif" font-size="17">Study records and derived analysis stay local by default</text>
+    <text x="25" y="6" fill="#d7e5d1" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">学习记录与派生分析默认走本地路径</text>
     <circle cx="514" cy="0" r="6" fill="#dc9b82"/>
-    <text x="531" y="6" fill="#e5b9a9" font-family="Georgia, serif" font-size="17">AI is an optional layer</text>
+    <text x="531" y="6" fill="#e5b9a9" font-family="'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="18">AI 连接是可选层</text>
   </g>
 </svg>
