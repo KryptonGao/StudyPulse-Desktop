@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::{self, Read, Write},
+    net::IpAddr,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::Arc,
@@ -274,10 +275,10 @@ impl RunnerManager {
         // External Runner configuration is honored only as a complete pair of
         // URL and token.  This avoids sending unauthenticated code to a custom
         // endpoint and keeps the default managed-container path explicit.
-        let base_url = std::env::var("STUDYPULSE_RUNNER_URL")
-            .unwrap_or_else(|_| DEFAULT_RUNNER_URL.into())
-            .trim_end_matches('/')
-            .to_owned();
+        let configured_url =
+            std::env::var("STUDYPULSE_RUNNER_URL").unwrap_or_else(|_| DEFAULT_RUNNER_URL.into());
+        let is_default_url = configured_url.trim_end_matches('/') == DEFAULT_RUNNER_URL;
+        let base_url = validate_runner_base_url(&configured_url)?;
         let configured_token = std::env::var("STUDYPULSE_RUNNER_TOKEN")
             .ok()
             .filter(|token| !token.trim().is_empty());
@@ -291,7 +292,7 @@ impl RunnerManager {
             });
         }
 
-        if base_url != DEFAULT_RUNNER_URL {
+        if !is_default_url {
             return Err(ToolError::Execution(
                 "STUDYPULSE_RUNNER_TOKEN is required when STUDYPULSE_RUNNER_URL is customized"
                     .into(),
@@ -446,6 +447,56 @@ fn docker_program() -> &'static str {
     .unwrap_or("docker")
 }
 
+fn validate_runner_base_url(raw: &str) -> Result<String, ToolError> {
+    // Runner URLs are a credential boundary.  Remote HTTP would expose the
+    // bearer token and source payload, while userinfo/query/fragment components
+    // make endpoint interpretation ambiguous and can put secrets into errors.
+    let trimmed = raw.trim().trim_end_matches('/');
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| ToolError::Execution("invalid STUDYPULSE_RUNNER_URL".into()))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| ToolError::Execution("STUDYPULSE_RUNNER_URL must include a host".into()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.cannot_be_a_base()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ToolError::Execution(
+            "STUDYPULSE_RUNNER_URL must be an http(s) URL without credentials, query, or fragment"
+                .into(),
+        ));
+    }
+    if url.scheme() == "http"
+        && !host.eq_ignore_ascii_case("localhost")
+        && !host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+    {
+        return Err(ToolError::Execution(
+            "HTTP Runner URLs are allowed only for loopback hosts; use HTTPS for remote Runners"
+                .into(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn runner_http_client(timeout: StdDuration) -> Result<Client, ToolError> {
+    // Redirects are disabled instead of relying on a library's credential
+    // forwarding rules.  A Runner endpoint is a trusted destination selected by
+    // the user, so any redirect is a configuration failure, not a recovery path.
+    Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("StudyPulse-Desktop/1.0")
+        .build()
+        .map_err(|error| ToolError::Execution(error.to_string()))
+}
+
 fn wait_for_runner_health(base_url: &str, token: &str) -> Result<RunnerHealth, ToolError> {
     // Health polling tolerates a just-started managed container, but the
     // deadline bounds startup.  It returns a parsed capability proof so the
@@ -453,11 +504,7 @@ fn wait_for_runner_health(base_url: &str, token: &str) -> Result<RunnerHealth, T
     // Health is a capability proof, not a reachability ping.  In addition to a
     // successful response, the Runner must report `isolation: container` so a
     // misconfigured plain HTTP service is never mistaken for the sandbox.
-    let client = Client::builder()
-        .timeout(StdDuration::from_secs(2))
-        .user_agent("StudyPulse-Desktop/1.0")
-        .build()
-        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let client = runner_http_client(StdDuration::from_secs(2))?;
     let health_url = format!("{base_url}/health");
     let deadline = Instant::now() + RUNNER_HEALTH_TIMEOUT;
     loop {
@@ -1536,11 +1583,7 @@ fn execute_in_runner(args: &CodeExecutionArgs, runner: &RunnerManager) -> Result
     // request boundary.  Bearer authentication is attached to the execute call
     // and the Runner owns the stronger container policy.
     let connection = runner.ensure_connection()?;
-    let client = Client::builder()
-        .timeout(StdDuration::from_secs(35))
-        .user_agent("StudyPulse-Desktop/1.0")
-        .build()
-        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let client = runner_http_client(StdDuration::from_secs(35))?;
     let requested_language = match args.language.to_ascii_lowercase().as_str() {
         // The client checks the Runner's advertised language list again below;
         // this local mapping prevents aliases from reaching the HTTP payload.
@@ -1570,18 +1613,19 @@ fn execute_in_runner(args: &CodeExecutionArgs, runner: &RunnerManager) -> Result
         }))
         .send()
         .map_err(|error| ToolError::Execution(format!("Runner request failed: {error}")))?;
+    parse_runner_response(response)
+}
+
+fn parse_runner_response(response: reqwest::blocking::Response) -> Result<Value, ToolError> {
     let status = response.status();
-    let value: Value = response
-        .json()
-        .map_err(|error| ToolError::Execution(format!("invalid Runner response: {error}")))?;
     if !status.is_success() {
-        // Preserve the structured Runner body in the error for diagnostics, but
-        // do not treat an HTTP success with a malformed body as execution success.
-        return Err(ToolError::Execution(format!(
-            "Runner returned {status}: {value}"
-        )));
+        // Never include the response body here.  A hostile or misconfigured
+        // Runner could echo the bearer token, source code, or stdin in JSON.
+        return Err(ToolError::Execution(format!("Runner returned {status}")));
     }
-    Ok(value)
+    response
+        .json()
+        .map_err(|error| ToolError::Execution(format!("invalid Runner response: {error}")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1734,5 +1778,124 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["stdout"], "4\n");
         assert_eq!(result["output_truncated"], false);
+    }
+
+    #[test]
+    fn runner_url_requires_https_except_for_loopback() {
+        assert!(validate_runner_base_url("https://runner.example.com").is_ok());
+        assert!(validate_runner_base_url("http://localhost:45891").is_ok());
+        assert!(validate_runner_base_url("http://127.0.0.1:45891").is_ok());
+        assert!(validate_runner_base_url("http://[::1]:45891").is_ok());
+        assert!(validate_runner_base_url("http://127.0.0.2:45891").is_ok());
+
+        assert!(validate_runner_base_url("http://runner.example.com").is_err());
+        assert!(validate_runner_base_url("ftp://runner.example.com").is_err());
+        assert!(validate_runner_base_url("https://user:secret@runner.example.com").is_err());
+        assert!(validate_runner_base_url("https://runner.example.com?token=secret").is_err());
+        assert!(validate_runner_base_url("https://runner.example.com/#secret").is_err());
+    }
+
+    #[test]
+    fn runner_client_does_not_follow_redirects_or_forward_bearer_token() {
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+
+        fn read_request(mut stream: TcpStream) -> String {
+            let _ = stream.set_read_timeout(Some(StdDuration::from_millis(500)));
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        bytes.extend_from_slice(&buffer[..count]);
+                        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+
+        let target_thread = thread::spawn(move || {
+            target_listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + StdDuration::from_millis(300);
+            loop {
+                match target_listener.accept() {
+                    Ok((stream, _)) => return Some(read_request(stream)),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return None;
+                        }
+                        thread::sleep(StdDuration::from_millis(10));
+                    }
+                    Err(error) => panic!("target listener failed: {error}"),
+                }
+            }
+        });
+
+        let redirect_thread = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener.accept().unwrap();
+            let request = read_request(stream.try_clone().unwrap());
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        });
+
+        let client = runner_http_client(StdDuration::from_secs(2)).unwrap();
+        let response = client
+            .get(format!("http://{redirect_address}/health"))
+            .bearer_auth("runner-secret")
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+
+        let first_request = redirect_thread.join().unwrap().to_ascii_lowercase();
+        let second_request = target_thread.join().unwrap();
+        assert!(first_request.contains("authorization: bearer runner-secret"));
+        assert!(second_request.is_none());
+    }
+
+    #[test]
+    fn runner_error_does_not_include_response_body_secrets() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let response_body = r#"{"error":"runner-secret source-code stdin-secret"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let client = runner_http_client(StdDuration::from_secs(2)).unwrap();
+        let response = client
+            .post(format!("http://{address}/v1/execute"))
+            .bearer_auth("runner-secret")
+            .json(&json!({"code": "source-code", "stdin": "stdin-secret"}))
+            .send()
+            .unwrap();
+        let error = parse_runner_response(response).unwrap_err().to_string();
+        server.join().unwrap();
+
+        assert!(error.contains("401"));
+        assert!(!error.contains("runner-secret"));
+        assert!(!error.contains("source-code"));
+        assert!(!error.contains("stdin-secret"));
     }
 }

@@ -114,7 +114,8 @@ function eventLabel(t: Translate, value: AgentEventKind): string {
 function PythonCode({ source }: { source: string }) {
   // Code is displayed as text inside <code>; it is never executed by this
   // component, and the Agent page only supplies code from an event payload.
-  return <pre className="agent-python-code"><code>{source}</code></pre>;
+  const { t } = useI18n();
+  return <><p className="code-safety-warning" role="alert">{t("agent.localPythonWarning")}</p><pre className="agent-python-code"><code>{source}</code></pre></>;
 }
 
 function AgentTimelineEvent({ event, events, language, t }: { event: AgentEvent; events: AgentEvent[]; language: string; t: Translate }) {

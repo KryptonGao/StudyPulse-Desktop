@@ -198,15 +198,33 @@ const interfaceStyleTranslations: Record<Language, Record<string, string>> = {
   },
 };
 
+const agentSecurityTranslations: Record<Language, Record<string, string>> = {
+  en: {
+    "agent.localPythonWarning": "Local Python is not a security sandbox. If Docker Runner is not configured, this code runs with your account's host permissions.",
+  },
+  "zh-CN": {
+    "agent.localPythonWarning": "本机 Python 不是安全沙箱。如果没有配置 Docker Runner，这段代码会以当前用户的主机权限运行。",
+  },
+  "zh-TW": {
+    "agent.localPythonWarning": "本機 Python 不是安全沙箱。如果沒有設定 Docker Runner，這段程式碼會以目前使用者的主機權限執行。",
+  },
+  ja: {
+    "agent.localPythonWarning": "ローカル Python は安全なサンドボックスではありません。Docker Runner を設定していない場合、このコードは現在のユーザー権限で実行されます。",
+  },
+  ko: {
+    "agent.localPythonWarning": "로컬 Python은 보안 샌드박스가 아닙니다. Docker Runner를 구성하지 않으면 이 코드는 현재 계정의 호스트 권한으로 실행됩니다.",
+  },
+};
+
 // Merge order matters: base language, style labels, then feature group. The
 // zh-TW/ja/ko maps currently omit P2 bundles, so `t` falls back to English for
 // those missing feature keys rather than pretending the bundles are complete.
 const dictionaries: Record<Language, Record<string, string>> = {
-  en: { ...en, ...interfaceStyleTranslations.en, ...p1En, ...p2En },
-  "zh-CN": { ...zhCN, ...interfaceStyleTranslations["zh-CN"], ...p1ZhCN, ...p2ZhCN },
-  "zh-TW": { ...zhTW, ...interfaceStyleTranslations["zh-TW"], ...p1ZhTW, "planner.savePlan": "儲存計畫" },
-  ja: { ...ja, ...interfaceStyleTranslations.ja, ...p1Ja, "planner.savePlan": "計画を保存" },
-  ko: { ...ko, ...interfaceStyleTranslations.ko, ...p1Ko, "planner.savePlan": "계획 저장" },
+  en: { ...en, ...interfaceStyleTranslations.en, ...agentSecurityTranslations.en, ...p1En, ...p2En },
+  "zh-CN": { ...zhCN, ...interfaceStyleTranslations["zh-CN"], ...agentSecurityTranslations["zh-CN"], ...p1ZhCN, ...p2ZhCN },
+  "zh-TW": { ...zhTW, ...interfaceStyleTranslations["zh-TW"], ...agentSecurityTranslations["zh-TW"], ...p1ZhTW, "planner.savePlan": "儲存計畫" },
+  ja: { ...ja, ...interfaceStyleTranslations.ja, ...agentSecurityTranslations.ja, ...p1Ja, "planner.savePlan": "計画を保存" },
+  ko: { ...ko, ...interfaceStyleTranslations.ko, ...agentSecurityTranslations.ko, ...p1Ko, "planner.savePlan": "계획 저장" },
 };
 
 function interpolate(template: string, variables?: Record<string, string | number>): string {
