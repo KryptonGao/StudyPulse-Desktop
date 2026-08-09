@@ -99,7 +99,7 @@ Today 页面把未完成任务、学习时长、连续学习天数、待复习�
 
 ## Agent 代码执行
 
-本机 Python 是默认后端，每次执行都需要用户确认，但它**不是安全沙箱**，不要用它运行不可信代码。
+本机 Python 是默认后端，每次执行都需要用户确认；确认卡片会明确提示它**不是安全沙箱**。如果没有配置 Docker Runner，代码会以当前用户的主机权限运行，不要用它运行不可信代码。
 
 如果需要容器化执行，可以使用可选 Runner：
 
@@ -112,7 +112,7 @@ cd ..
 STUDYPULSE_CODE_EXECUTION_BACKEND=docker npm run tauri:dev
 ```
 
-也可以连接外部 Runner。此时需要同时配置 `STUDYPULSE_RUNNER_URL` 和 `STUDYPULSE_RUNNER_TOKEN`；Runner 会在执行前检查认证的 `/health`，并要求服务报告容器隔离状态。更多说明见 [`core/crates/studypulse-runner/README.md`](core/crates/studypulse-runner/README.md)。
+也可以连接外部 Runner。此时需要同时配置 `STUDYPULSE_RUNNER_URL` 和 `STUDYPULSE_RUNNER_TOKEN`；远程 Runner URL 必须使用 HTTPS，HTTP 只允许 `localhost`、`127.0.0.1` 和 `::1`。Runner 会在执行前检查认证的 `/health`，并要求服务报告容器隔离状态。更多说明见 [`core/crates/studypulse-runner/README.md`](core/crates/studypulse-runner/README.md)。
 
 ## Workspace 长什么样
 

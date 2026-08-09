@@ -2,7 +2,8 @@
 
 The Runner is an optional, strongly isolated companion for Agent code
 execution. The desktop default is local Python after native user confirmation;
-use `STUDYPULSE_CODE_EXECUTION_BACKEND=docker` when this containerized
+the confirmation card warns that local Python is not a security sandbox. Use
+`STUDYPULSE_CODE_EXECUTION_BACKEND=docker` when this containerized
 backend is preferred. The Runner refuses to execute code unless it detects that
 it is inside a container. A locally launched binary is intentionally reported as
 `isolation: unverified`.
@@ -33,6 +34,10 @@ When the Docker backend is enabled, the desktop client checks authenticated
 desktop Core automatically starts and stops a local container from this image.
 It generates the bearer token in memory and does not put it in command-line
 arguments or logs.
+
+Remote Runner URLs must use HTTPS. Plain HTTP is accepted only for loopback
+development endpoints (`localhost`, `127.0.0.1`, or `::1`), and redirects are
+not followed so the bearer token cannot be forwarded to another endpoint.
 
 Recommended container flags are loopback-only port publishing, read-only root
 filesystem, no network, no host mounts, a non-root user, and explicit CPU,

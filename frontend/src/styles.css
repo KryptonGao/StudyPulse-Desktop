@@ -407,3 +407,6 @@ h1, h2, h3, strong { letter-spacing: -0.025em; }
   :root[data-style="apple"] .proposal-card,
   :root[data-style="apple"] .question-card { background: var(--surface); -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
+
+.code-safety-warning { margin: 10px 0 0; color: var(--danger); font-size: 11px; line-height: 1.45; }
+.permission-card .code-safety-warning { margin-top: 8px; overflow: visible; color: var(--danger); white-space: normal; }

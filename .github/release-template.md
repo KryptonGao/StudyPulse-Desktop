@@ -36,6 +36,8 @@ Trends：90 天学习热力图、学习时长、心情/精力、科目成绩与�
 
 支持 Chat、Deep Solve、Mastery、Deep Research、Question Lab 与 Visualize 模式
 
+Agent 本机 Python 执行需要用户确认，但不是安全沙箱；需要隔离时请使用 Docker Runner。远程 Runner 必须使用 HTTPS，HTTP 仅允许 loopback 地址。
+
 <img width="1392" height="892" alt="StudyPulse Agent" src="https://github.com/user-attachments/assets/c6e727b7-e628-4020-8cf4-7896bf742f54" />
 
 ### Requirements
