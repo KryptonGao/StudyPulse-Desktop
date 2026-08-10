@@ -182,4 +182,4 @@ The Health/Recovery module is not included in the current client. Cross-device s
 
 This lightweight README update was completed by Codex.
 
-<sub>The desktop version metadata in this repository is <code>0.7.0</code>; release status is determined by the actual GitHub Release.</sub>
+<sub>The desktop version metadata in this repository is <code>0.8.0</code>; release status is determined by the actual GitHub Release.</sub>
