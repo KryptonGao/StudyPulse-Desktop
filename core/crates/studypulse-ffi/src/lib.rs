@@ -13,8 +13,9 @@ use std::{
 
 use parking_lot::Mutex;
 use studypulse_agent::{
-    AgentEvent, AgentEventKind, AgentMode, AgentRuntime, CapabilityManifest, ConfirmationDecision,
-    ConversationMessage, ConversationRole, RunStatus, capability_manifests,
+    AgentEvent, AgentEventKind, AgentMode, AgentRuntime, ArtifactRef, CapabilityManifest,
+    ConfirmationDecision, ConversationMessage, ConversationRole, RunStatus, SourceRef, TurnRequest,
+    TurnResult, UsageSummary, capability_manifests,
 };
 use studypulse_model_client::{
     ByokConfig, CloudAuthTokens, CloudModelClient, CloudProfile, DEFAULT_CLOUD_API_BASE_URL,
@@ -22,16 +23,17 @@ use studypulse_model_client::{
 };
 use studypulse_tools::PermissionLevel;
 use studypulse_workspace::{
-    AgentMessage, AgentMessageRole, AgentNotebook, BackupExportOptions, BackupInspection,
-    BackupResolution, CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal, CoachProposal,
-    ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal,
-    ExamPlan, ExamReview, ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade,
-    HandwritingAnswerEntry, HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry,
-    MistakeNoteFull, PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType,
-    SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject,
-    TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme,
-    TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired,
-    parse_structured_json, proposal_task,
+    AgentMessage, AgentMessageRole, AgentNotebook, AgentTurn as WorkspaceAgentTurn,
+    BackupExportOptions, BackupInspection, BackupResolution, CoachAnalysis, CoachChat,
+    CoachConversationMessage, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry,
+    DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal, ExamPlan, ExamReview,
+    ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
+    HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull,
+    PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SearchMatch,
+    SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem,
+    TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme, TodaySnapshot,
+    TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired, parse_structured_json,
+    proposal_task,
 };
 use thiserror::Error;
 
@@ -670,6 +672,12 @@ pub struct AgentMessageDto {
     pub role: AgentMessageRoleDto,
     pub content: String,
     pub created_at: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub source_refs_json: Option<String>,
+    #[serde(default)]
+    pub artifact_refs_json: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
@@ -706,6 +714,74 @@ pub struct CapabilityManifestDto {
     pub description: String,
     pub stages: Vec<String>,
     pub max_loops: u32,
+    pub tools_used: Vec<String>,
+    pub result_kind: String,
+    pub request_schema_json: String,
+    pub config_defaults_json: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct SourceRefDto {
+    pub source_type: String,
+    pub locator: String,
+    pub title: Option<String>,
+    pub excerpt: Option<String>,
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct ArtifactRefDto {
+    pub artifact_id: String,
+    pub path: String,
+    pub extension: String,
+    pub render_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct UsageSummaryDto {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub model_calls: u32,
+    pub estimated: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct TurnResultDto {
+    pub schema_version: u32,
+    pub mode: AgentModeDto,
+    pub result_kind: String,
+    pub text: String,
+    pub output_json: Option<String>,
+    pub sources: Vec<SourceRefDto>,
+    pub artifacts: Vec<ArtifactRefDto>,
+    pub usage: UsageSummaryDto,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct AgentTurnDto {
+    pub id: String,
+    pub mode: String,
+    pub goal: String,
+    pub status: String,
+    pub stage: Option<String>,
+    pub loop_index: u32,
+    pub last_sequence: u64,
+    pub resume_safe: bool,
+    pub checkpoint: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, uniffi::Record)]
+pub struct TurnRequestDto {
+    pub mode: AgentModeDto,
+    pub goal: String,
+    pub source_paths: Vec<String>,
+    pub history: Vec<AgentMessageDto>,
+    pub notebook_id: Option<String>,
+    pub config_json: Option<String>,
 }
 
 // Search results expose only bounded relative paths/snippets.  PermissionDto is
@@ -750,6 +826,11 @@ pub enum AgentEventKindDto {
     StageCompleted,
     InputRequired,
     ArtifactCreated,
+    Observation,
+    Sources,
+    Result,
+    Usage,
+    TurnRecovered,
     Failed,
     Cancelled,
     Completed,
@@ -1137,6 +1218,69 @@ impl StudyPulseCore {
             .map_err(CoreError::message)?;
         *self.last_run_id.lock() = Some(run_id.clone());
         Ok(run_id)
+    }
+
+    pub fn start_turn(&self, request: TurnRequestDto) -> Result<String, CoreError> {
+        if self.restore_active.load(Ordering::Acquire) {
+            return Err(CoreError::message(
+                "cannot start Agent while a backup restore is active",
+            ));
+        }
+        let runtime = self.runtime()?;
+        let history = request
+            .history
+            .into_iter()
+            .map(|message| ConversationMessage {
+                role: match message.role {
+                    AgentMessageRoleDto::User => ConversationRole::User,
+                    AgentMessageRoleDto::Assistant => ConversationRole::Assistant,
+                },
+                content: message.content,
+            })
+            .collect();
+        let run_id = runtime
+            .start_turn(TurnRequest {
+                mode: request.mode.into(),
+                goal: request.goal,
+                source_paths: request.source_paths,
+                history,
+                notebook_id: request.notebook_id,
+                config_json: request.config_json,
+            })
+            .map_err(CoreError::message)?;
+        *self.last_run_id.lock() = Some(run_id.clone());
+        Ok(run_id)
+    }
+
+    pub fn list_agent_turns(&self) -> Result<Vec<AgentTurnDto>, CoreError> {
+        Ok(self
+            .runtime()?
+            .list_turns()
+            .map_err(CoreError::message)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    pub fn resume_agent_turn(&self, turn_id: String) -> Result<String, CoreError> {
+        if self.restore_active.load(Ordering::Acquire) {
+            return Err(CoreError::message(
+                "cannot resume Agent while a backup restore is active",
+            ));
+        }
+        let run_id = self
+            .runtime()?
+            .resume_turn(&turn_id)
+            .map_err(CoreError::message)?;
+        *self.last_run_id.lock() = Some(run_id.clone());
+        Ok(run_id)
+    }
+
+    pub fn get_agent_turn_result(&self, run_id: String) -> Result<TurnResultDto, CoreError> {
+        self.runtime()?
+            .turn_result_for_run(&run_id)
+            .map(Into::into)
+            .map_err(CoreError::message)
     }
 
     pub fn run_ai_feature_json(&self, request: AiFeatureRequestDto) -> Result<String, CoreError> {
@@ -3943,6 +4087,9 @@ impl From<AgentMessage> for AgentMessageDto {
             },
             content: value.content,
             created_at: value.created_at,
+            turn_id: value.turn_id,
+            source_refs_json: value.source_refs_json,
+            artifact_refs_json: value.artifact_refs_json,
         }
     }
 }
@@ -3963,6 +4110,9 @@ impl TryFrom<AgentMessageDto> for AgentMessage {
             },
             content: value.content,
             created_at: value.created_at,
+            turn_id: value.turn_id,
+            source_refs_json: value.source_refs_json,
+            artifact_refs_json: value.artifact_refs_json,
         })
     }
 }
@@ -4028,6 +4178,11 @@ impl From<AgentEventKind> for AgentEventKindDto {
             AgentEventKind::StageCompleted => Self::StageCompleted,
             AgentEventKind::InputRequired => Self::InputRequired,
             AgentEventKind::ArtifactCreated => Self::ArtifactCreated,
+            AgentEventKind::Observation => Self::Observation,
+            AgentEventKind::Sources => Self::Sources,
+            AgentEventKind::Result => Self::Result,
+            AgentEventKind::Usage => Self::Usage,
+            AgentEventKind::TurnRecovered => Self::TurnRecovered,
             AgentEventKind::Failed => Self::Failed,
             AgentEventKind::Cancelled => Self::Cancelled,
             AgentEventKind::Completed => Self::Completed,
@@ -4114,6 +4269,79 @@ impl From<CapabilityManifest> for CapabilityManifestDto {
             description: value.description,
             stages: value.stages,
             max_loops: value.max_loops,
+            tools_used: value.tools_used,
+            result_kind: value.result_kind,
+            request_schema_json: value.request_schema_json,
+            config_defaults_json: value.config_defaults_json,
+        }
+    }
+}
+
+impl From<WorkspaceAgentTurn> for AgentTurnDto {
+    fn from(value: WorkspaceAgentTurn) -> Self {
+        Self {
+            id: value.id,
+            mode: value.mode,
+            goal: value.goal,
+            status: value.status,
+            stage: value.stage,
+            loop_index: value.loop_index,
+            last_sequence: value.last_sequence,
+            resume_safe: value.resume_safe,
+            checkpoint: value.checkpoint,
+            error: value.error,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<SourceRef> for SourceRefDto {
+    fn from(value: SourceRef) -> Self {
+        Self {
+            source_type: value.source_type,
+            locator: value.locator,
+            title: value.title,
+            excerpt: value.excerpt,
+            tool_call_id: value.tool_call_id,
+        }
+    }
+}
+
+impl From<ArtifactRef> for ArtifactRefDto {
+    fn from(value: ArtifactRef) -> Self {
+        Self {
+            artifact_id: value.artifact_id,
+            path: value.path,
+            extension: value.extension,
+            render_type: value.render_type,
+        }
+    }
+}
+
+impl From<UsageSummary> for UsageSummaryDto {
+    fn from(value: UsageSummary) -> Self {
+        Self {
+            prompt_tokens: value.prompt_tokens,
+            completion_tokens: value.completion_tokens,
+            total_tokens: value.total_tokens,
+            model_calls: value.model_calls,
+            estimated: value.estimated,
+        }
+    }
+}
+
+impl From<TurnResult> for TurnResultDto {
+    fn from(value: TurnResult) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            mode: value.mode.into(),
+            result_kind: value.result_kind,
+            text: value.text,
+            output_json: value.output_json,
+            sources: value.sources.into_iter().map(Into::into).collect(),
+            artifacts: value.artifacts.into_iter().map(Into::into).collect(),
+            usage: value.usage.into(),
         }
     }
 }
@@ -4225,6 +4453,10 @@ mod tests {
             }
         }
         assert_eq!(core.get_tasks().unwrap().len(), 1);
+        assert_eq!(core.list_agent_turns().unwrap().len(), 1);
+        let result = core.get_agent_turn_result(run_id).unwrap();
+        assert_eq!(result.schema_version, 1);
+        assert!(result.usage.model_calls >= 1);
     }
 
     #[test]
