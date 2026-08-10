@@ -14,13 +14,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use studypulse_ffi::{
-    AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, AgentTurnDto, AiFeatureRequestDto, BackupExportOptionsDto,
-    TurnResultDto,
+    AgentEventDto, AgentMessageDto, AgentModeDto, AgentNotebookDto, AiFeatureRequestDto, BackupExportOptionsDto,
     BackupExportResultDto, BackupInspectionDto, BackupResolutionDto, ByokConfigDto,
     CloudAccountDto, CloudAuthTokensDto, ComprehensiveExamDto, ConfirmationDecisionDto, CoreError,
     DiaryEntryDto, ExamDto, FileEntryDto, GradeDto, ImportReportDto, MistakeNoteDto, OperationEventDto,
     RestoreModeDto, ReviewStateDto, RunStatusDto, SearchMatchDto, SessionIntensityDto,
-    StudyPhaseDto, StudySessionDto, SubjectDto, TaskDto, TimeInvestmentSubjectDto, TurnRequestDto,
+    StudyPhaseDto, StudySessionDto, SubjectDto, TaskDto, TimeInvestmentSubjectDto,
     TimerSnapshotDto, TodaySnapshotDto, TrendsSnapshotDto, WorkspaceDto,
 };
 use tauri::{Manager, State};
@@ -563,37 +562,6 @@ async fn start_agent(
         core.start_agent_with_mode(input.mode, input.goal, input.source_paths, input.history)
     })
     .await
-}
-
-#[tauri::command]
-async fn start_turn(
-    request: TurnRequestDto,
-    state: State<'_, AppState>,
-) -> Result<String, AppError> {
-    core_call(state, move |core| core.start_turn(request)).await
-}
-
-#[tauri::command]
-async fn list_agent_turns(
-    state: State<'_, AppState>,
-) -> Result<Vec<AgentTurnDto>, AppError> {
-    core_call(state, |core| core.list_agent_turns()).await
-}
-
-#[tauri::command]
-async fn resume_agent_turn(
-    turn_id: String,
-    state: State<'_, AppState>,
-) -> Result<String, AppError> {
-    core_call(state, move |core| core.resume_agent_turn(turn_id)).await
-}
-
-#[tauri::command]
-async fn get_agent_turn_result(
-    run_id: String,
-    state: State<'_, AppState>,
-) -> Result<TurnResultDto, AppError> {
-    core_call(state, move |core| core.get_agent_turn_result(run_id)).await
 }
 
 #[tauri::command]
@@ -1205,10 +1173,6 @@ pub fn run() {
             disconnect_ai,
             list_agent_capabilities,
             start_agent,
-            start_turn,
-            list_agent_turns,
-            resume_agent_turn,
-            get_agent_turn_result,
             run_ai_feature,
             get_ai_diagnostics,
             wait_agent_events,

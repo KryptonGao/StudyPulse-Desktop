@@ -31,7 +31,7 @@ flowchart LR
 - **`studypulse-workspace`**（约 4400 行）— Workspace 存储（`workspace.rs`）、模型（`models.rs`）、SRS/趋势/快照（`analytics.rs`）、备份（`backup.rs`）、路径安全（`safe_path.rs`）、平台抽象（`platform.rs`）。
 - **`studypulse-tools`**（1469 行）— Agent 工具注册表：定义、参数校验、权限分级、执行（含本机 Python 与 Docker Runner 代码执行）。
 - **`studypulse-model-client`**（1770 行）— `ModelClient` trait、`CloudModelClient`、`OpenAICompatibleModelClient`、`MockModelClient`、错误分类。
-- **`studypulse-agent`** — Agent runtime：`AgentMode`、Capability/Turn 协议、事件时间线、确认/输入等待、循环上限。
+- **`studypulse-agent`**（1364 行）— Agent runtime：`AgentMode`、事件时间线、确认/输入等待、循环上限。
 - **`studypulse-ffi`**（3307 行）— 统一入口 `StudyPulseCore`（约 90 个方法）、全部 `*Dto`、`CoreError`；uniffi 0.30，可生成 Swift 绑定（`uniffi.toml`：`module_name = "StudyPulseCore"`）。
 - **`studypulse-runner`**（275 行）— 可选容器化代码执行后端（Docker，`/health` + bearer token）。
 
@@ -51,7 +51,6 @@ StudyPulseWorkspace/
 ├── Media/images|audio/
 ├── Agent/
 │   ├── runs/                  # Agent 事件日志：{run_id}.jsonl（每事件一行）
-│   ├── turns/                 # Agent Turn 检查点：{turn_id}.json（可显式恢复）
 │   ├── artifacts/{run_id}/{artifact_id}.{ext}
 │   ├── memory/workspace.json
 │   ├── notebooks/{scope}/memory.json
@@ -116,7 +115,7 @@ StudyPulseWorkspace/
 
 ### 8.1 模式与能力清单（studypulse-agent/src/lib.rs）
 
-9 种 `AgentMode`（snake_case 序列化），`capability_manifests()` 定义 stages、工具清单、结果类型与 max_loops：
+6 种 `AgentMode`（snake_case 序列化），`capability_manifests()` 定义 stages 与 max_loops：
 
 | 模式 | stages | max_loops |
 |---|---|---|
@@ -126,9 +125,6 @@ StudyPulseWorkspace/
 | DeepResearch | rephrasing, decomposing, researching, reporting | 16 |
 | QuestionLab | ideating, blueprinting, generating, checking | 10 |
 | Visualize | analyzing, generating, reviewing | 5 |
-| Coach | diagnosing, forecasting, proposing, checking | 8 |
-| ExamSimulation | blueprinting, generating, grading, analyzing | 8 |
-| ReversePlanner | contextualizing, prioritizing, routing, checking | 8 |
 
 全局上限 `MAX_AGENT_LOOPS = 8`（无 manifest 时的兜底）。`tool_is_enabled` **当前恒返回 true**（有意设计：给模型统一工具目录，执行期按权限拦截；注释在 `lib.rs:1025`，不要"修复"成按模式过滤）。
 
@@ -147,7 +143,6 @@ StudyPulseWorkspace/
 - `ask_user` 工具（Read 级）→ `InputRequired` 事件，`submit_agent_input` 提交 JSON 字符串（≤ 8 000 字符，非空）。
 - 取消：`cancel_agent` 置 `cancelled` 原子标志 + `Notify` 唤醒模型等待 + condvar 唤醒确认/输入等待；模型请求用 `tokio::select! { biased; ... }` 让取消优先。
 - 工具调用消息统一回填 `ChatMessage::Tool { call_id, name, content }` 继续模型循环；模型没有 tool_calls 时结束 run。
-- 统一 Turn 运行时以 `CapabilityManifest`、`TurnRequest`、`TurnResult`、来源、Artifact 和用量摘要作为协议；Turn 检查点写入 `Agent/turns/`，应用重启后只对安全检查点提供用户显式恢复，不自动重放外部请求或未完成写入。
 
 ### 8.4 工具目录（studypulse-tools/src/lib.rs，12 个）
 

@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fs::OpenOptions,
+    io::Write,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,13 +13,12 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use studypulse_model_client::{
-    ChatMessage, ModelClient, ModelRequest, ModelTextDeltaHandler, ModelToolCall,
-    ModelToolDefinition, ModelUsage,
+    ChatMessage, ModelClient, ModelRequest, ModelTextDeltaHandler, ModelToolDefinition,
 };
 use studypulse_tools::{PermissionLevel, ToolRegistry};
-use studypulse_workspace::{AgentTurn, Workspace};
+use studypulse_workspace::Workspace;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -28,7 +29,6 @@ use uuid::Uuid;
 // keeps confirmation, cancellation, and Workspace writes in one place.
 
 pub const MAX_AGENT_LOOPS: usize = 8;
-const MAX_PARALLEL_READ_TOOLS: usize = 4;
 
 #[derive(Debug, Clone, Copy)]
 struct ToolPolicy {
@@ -64,76 +64,6 @@ pub struct CapabilityManifest {
     pub description: String,
     pub stages: Vec<String>,
     pub max_loops: u32,
-    pub tools_used: Vec<String>,
-    pub result_kind: String,
-    pub request_schema_json: String,
-    pub config_defaults_json: String,
-}
-
-/// A capability owns the user-facing contract while AgentRuntime owns the
-/// lifecycle and permission state machine. The first-party registry is
-/// declarative today; specialized pipelines can implement this trait without
-/// changing the FFI or event protocol.
-pub trait Capability: Send + Sync {
-    fn manifest(&self) -> CapabilityManifest;
-    fn validate_result(&self, text: &str) -> Result<(), String>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ManifestCapability {
-    manifest: CapabilityManifest,
-}
-
-impl ManifestCapability {
-    pub fn new(manifest: CapabilityManifest) -> Self {
-        Self { manifest }
-    }
-}
-
-impl Capability for ManifestCapability {
-    fn manifest(&self) -> CapabilityManifest {
-        self.manifest.clone()
-    }
-
-    fn validate_result(&self, text: &str) -> Result<(), String> {
-        validate_capability_result(self.manifest.mode, text)
-    }
-}
-
-#[derive(Default)]
-pub struct CapabilityRegistry {
-    capabilities: Vec<Arc<dyn Capability>>,
-}
-
-impl CapabilityRegistry {
-    pub fn built_in() -> Self {
-        Self {
-            capabilities: capability_manifests()
-                .into_iter()
-                .map(|manifest| Arc::new(ManifestCapability::new(manifest)) as Arc<dyn Capability>)
-                .collect(),
-        }
-    }
-
-    pub fn manifests(&self) -> Vec<CapabilityManifest> {
-        self.capabilities
-            .iter()
-            .map(|capability| capability.manifest())
-            .collect()
-    }
-
-    pub fn manifest(&self, mode: AgentMode) -> Option<CapabilityManifest> {
-        self.manifests()
-            .into_iter()
-            .find(|manifest| manifest.mode == mode)
-    }
-
-    pub fn validate_result(&self, mode: AgentMode, text: &str) -> Result<(), String> {
-        self.capabilities
-            .iter()
-            .find(|capability| capability.manifest().mode == mode)
-            .map_or(Ok(()), |capability| capability.validate_result(text))
-    }
 }
 
 // A manifest is serialized for the UI and also drives the model request.  The
@@ -216,68 +146,12 @@ fn manifest(
     stages: &[&str],
     max_loops: u32,
 ) -> CapabilityManifest {
-    let tools_used = match mode {
-        AgentMode::DeepResearch => vec![
-            "list_workspace_files",
-            "search_workspace",
-            "read_source",
-            "read_memory",
-            "web_search",
-            "paper_search",
-            "save_artifact",
-            "ask_user",
-        ],
-        AgentMode::QuestionLab => vec![
-            "list_workspace_files",
-            "search_workspace",
-            "read_source",
-            "web_search",
-            "paper_search",
-            "save_artifact",
-            "ask_user",
-        ],
-        AgentMode::Visualize => vec![
-            "list_workspace_files",
-            "search_workspace",
-            "read_source",
-            "save_artifact",
-            "code_execution",
-            "ask_user",
-        ],
-        _ => vec![
-            "list_workspace_files",
-            "search_workspace",
-            "read_source",
-            "read_memory",
-            "write_memory",
-            "web_search",
-            "paper_search",
-            "code_execution",
-            "save_artifact",
-            "ask_user",
-            "get_tasks",
-            "create_task",
-        ],
-    };
-    let result_kind = match mode {
-        AgentMode::DeepResearch => "research_report",
-        AgentMode::QuestionLab => "question_set",
-        AgentMode::Visualize => "visualization",
-        AgentMode::Coach | AgentMode::ExamSimulation | AgentMode::ReversePlanner => {
-            "structured_feature"
-        }
-        _ => "markdown",
-    };
     CapabilityManifest {
         mode,
         title: title.into(),
         description: description.into(),
         stages: stages.iter().map(|stage| (*stage).into()).collect(),
         max_loops,
-        tools_used: tools_used.into_iter().map(str::to_owned).collect(),
-        result_kind: result_kind.into(),
-        request_schema_json: r#"{"type":"object","properties":{"goal":{"type":"string"}}}"#.into(),
-        config_defaults_json: r#"{"maxToolCalls":32,"maxOutputBytes":262144}"#.into(),
     }
 }
 
@@ -319,11 +193,6 @@ pub enum AgentEventKind {
     StageCompleted,
     InputRequired,
     ArtifactCreated,
-    Observation,
-    Sources,
-    Result,
-    Usage,
-    TurnRecovered,
     Failed,
     Cancelled,
     Completed,
@@ -357,65 +226,6 @@ pub struct AgentEvent {
     pub stage: Option<String>,
     pub progress: Option<f64>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceRef {
-    pub source_type: String,
-    pub locator: String,
-    pub title: Option<String>,
-    pub excerpt: Option<String>,
-    pub tool_call_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactRef {
-    pub artifact_id: String,
-    pub path: String,
-    pub extension: String,
-    pub render_type: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct UsageSummary {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
-    pub model_calls: u32,
-    pub estimated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnResult {
-    pub schema_version: u32,
-    pub mode: AgentMode,
-    pub result_kind: String,
-    pub text: String,
-    pub output_json: Option<String>,
-    pub sources: Vec<SourceRef>,
-    pub artifacts: Vec<ArtifactRef>,
-    pub usage: UsageSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnRequest {
-    pub mode: AgentMode,
-    pub goal: String,
-    #[serde(default)]
-    pub source_paths: Vec<String>,
-    #[serde(default)]
-    pub history: Vec<ConversationMessage>,
-    #[serde(default)]
-    pub notebook_id: Option<String>,
-    #[serde(default)]
-    pub config_json: Option<String>,
-}
-
-pub const TURN_RESULT_SCHEMA_VERSION: u32 = 1;
 
 // Confirmation is intentionally a small explicit decision type.  A missing
 // decision is different from denial: the former means the run is still
@@ -510,18 +320,13 @@ struct RunControl {
     confirmation_changed: Condvar,
     input: Mutex<Option<InputState>>,
     input_changed: Condvar,
-    turn: Mutex<AgentTurn>,
-    usage: Mutex<UsageSummary>,
-    sources: Mutex<Vec<SourceRef>>,
-    artifacts: Mutex<Vec<ArtifactRef>>,
-    final_text: Mutex<String>,
 }
 
 // Sequence numbers start at one so zero is an unambiguous initial cursor for a
 // newly opened UI.  Every event is assigned by this control object before it
 // is made visible to either the in-memory buffer or the persisted JSONL log.
 impl RunControl {
-    fn new(run_id: String, turn: AgentTurn) -> Self {
+    fn new(run_id: String) -> Self {
         Self {
             run_id,
             status: Mutex::new(RunStatus::Started),
@@ -534,11 +339,6 @@ impl RunControl {
             confirmation_changed: Condvar::new(),
             input: Mutex::new(None),
             input_changed: Condvar::new(),
-            turn: Mutex::new(turn),
-            usage: Mutex::new(UsageSummary::default()),
-            sources: Mutex::new(Vec::new()),
-            artifacts: Mutex::new(Vec::new()),
-            final_text: Mutex::new(String::new()),
         }
     }
 }
@@ -563,7 +363,6 @@ pub struct AgentRuntime {
     tools: ToolRegistry,
     model: Arc<dyn ModelClient>,
     clock: Arc<dyn Clock>,
-    capabilities: CapabilityRegistry,
     state: Mutex<RuntimeState>,
 }
 
@@ -574,36 +373,6 @@ impl AgentRuntime {
         Self::with_clock(workspace, model, Arc::new(SystemClock))
     }
 
-    fn recover_persisted_turns(&self) {
-        // A process cannot safely restore an in-flight provider future or a
-        // pending write confirmation. Convert only checkpoints that were
-        // explicitly marked safe into user-visible recoverable turns; unsafe
-        // boundaries remain interrupted and require a fresh request.
-        let Ok(turns) = self.workspace.read_agent_turns() else {
-            return;
-        };
-        for mut turn in turns {
-            if matches!(
-                turn.status.as_str(),
-                "completed" | "failed" | "cancelled" | "resumed"
-            ) {
-                continue;
-            }
-            turn.status = if turn.resume_safe {
-                "recoverable".into()
-            } else {
-                "interrupted".into()
-            };
-            turn.checkpoint = "recovery".into();
-            turn.error = Some("The previous process stopped before this turn finished.".into());
-            turn.updated_at = self
-                .clock
-                .now()
-                .to_rfc3339_opts(SecondsFormat::Millis, true);
-            let _ = self.workspace.write_agent_turn(&turn);
-        }
-    }
-
     pub fn with_clock(
         workspace: Workspace,
         model: Arc<dyn ModelClient>,
@@ -611,19 +380,16 @@ impl AgentRuntime {
     ) -> Arc<Self> {
         // The registry and state are created once per runtime so a run cannot
         // accidentally use a different tool catalog halfway through a loop.
-        let runtime = Arc::new(Self {
+        Arc::new(Self {
             workspace,
             tools: ToolRegistry::default(),
             model,
             clock,
-            capabilities: CapabilityRegistry::built_in(),
             state: Mutex::new(RuntimeState {
                 active_run: None,
                 runs: HashMap::new(),
             }),
-        });
-        runtime.recover_persisted_turns();
-        runtime
+        })
     }
 
     pub fn start_agent(
@@ -679,120 +445,6 @@ impl AgentRuntime {
         )
     }
 
-    pub fn start_turn(self: &Arc<Self>, request: TurnRequest) -> Result<String, AgentError> {
-        let notebook_id = request.notebook_id.clone();
-        let config_json = request.config_json.clone();
-        if config_json
-            .as_ref()
-            .is_some_and(|value| value.len() > 64 * 1024)
-        {
-            return Err(AgentError::Runtime("turn config exceeds 64 KiB".into()));
-        }
-        let run_id = self.start_agent_with_mode_and_policy(
-            request.mode,
-            request.goal,
-            request.source_paths,
-            request.history,
-            ToolPolicy {
-                allow_tools: true,
-                read_only: false,
-            },
-        )?;
-        if (notebook_id.is_some() || config_json.is_some())
-            && let Ok(mut turn) = self.workspace.read_agent_turn(&run_id)
-        {
-            turn.notebook_id = notebook_id;
-            turn.config_json = config_json;
-            let _ = self.workspace.write_agent_turn(&turn);
-        }
-        Ok(run_id)
-    }
-
-    pub fn list_turns(&self) -> Result<Vec<AgentTurn>, AgentError> {
-        self.workspace
-            .read_agent_turns()
-            .map_err(|error| AgentError::Runtime(error.to_string()))
-    }
-
-    pub fn resume_turn(self: &Arc<Self>, turn_id: &str) -> Result<String, AgentError> {
-        let turn = self
-            .workspace
-            .read_agent_turn(turn_id)
-            .map_err(|error| AgentError::Runtime(error.to_string()))?;
-        if matches!(turn.status.as_str(), "completed" | "cancelled" | "resumed") {
-            return Err(AgentError::Runtime(
-                "only an unfinished recoverable Agent turn can be resumed".into(),
-            ));
-        }
-        if !turn.resume_safe {
-            return Err(AgentError::Runtime(
-                "this Agent turn stopped during an unsafe tool boundary and cannot be resumed automatically".into(),
-            ));
-        }
-        let mode = serde_json::from_str::<AgentMode>(&format!("\"{}\"", turn.mode))
-            .map_err(|_| AgentError::Runtime("stored Agent mode is invalid".into()))?;
-        let messages =
-            serde_json::from_str::<Vec<ChatMessage>>(&turn.history_json).map_err(|error| {
-                AgentError::Runtime(format!("stored Agent transcript is invalid: {error}"))
-            })?;
-        if messages.is_empty() {
-            return Err(AgentError::Runtime(
-                "stored Agent transcript is empty".into(),
-            ));
-        }
-        self.start_agent_from_messages(
-            mode,
-            turn.goal,
-            turn.source_paths,
-            messages,
-            ToolPolicy {
-                allow_tools: turn.allow_tools,
-                read_only: turn.read_only,
-            },
-        )
-    }
-
-    /// Return a live result when the run is in this process, otherwise replay
-    /// the durable Result event. This keeps completed turns inspectable after
-    /// an application restart without restoring non-serializable wait state.
-    pub fn turn_result_for_run(&self, run_id: &str) -> Result<TurnResult, AgentError> {
-        if let Ok(control) = self.control(run_id) {
-            return Ok(self.turn_result(&control));
-        }
-        let turn = self
-            .workspace
-            .read_agent_turn(run_id)
-            .map_err(|_| AgentError::RunNotFound)?;
-        if let Ok(lines) = self.workspace.read_agent_run_log(run_id) {
-            for line in lines.iter().rev() {
-                if let Ok(event) = serde_json::from_str::<AgentEvent>(line)
-                    && event.kind == AgentEventKind::Result
-                    && let Some(payload) = event.payload_json
-                    && let Ok(result) = serde_json::from_str::<TurnResult>(&payload)
-                {
-                    return Ok(result);
-                }
-            }
-        }
-        let mode = serde_json::from_str::<AgentMode>(&format!("\"{}\"", turn.mode))
-            .unwrap_or(AgentMode::Chat);
-        let result_kind = self
-            .capabilities
-            .manifest(mode)
-            .map(|manifest| manifest.result_kind)
-            .unwrap_or_else(|| "markdown".into());
-        Ok(TurnResult {
-            schema_version: TURN_RESULT_SCHEMA_VERSION,
-            mode,
-            result_kind,
-            text: turn.result_json.clone().unwrap_or_default(),
-            output_json: turn.result_json,
-            sources: Vec::new(),
-            artifacts: Vec::new(),
-            usage: UsageSummary::default(),
-        })
-    }
-
     fn start_agent_with_mode_and_policy(
         self: &Arc<Self>,
         mode: AgentMode,
@@ -832,50 +484,8 @@ impl AgentRuntime {
         // Source resolution returns selected relative paths from Workspace.  The
         // Agent carries this list into every read invocation instead of trusting
         // a path proposed by the model during a later loop.
-        let mut initial_messages = history
-            .into_iter()
-            .map(|message| match message.role {
-                ConversationRole::User => ChatMessage::User {
-                    content: message.content,
-                },
-                ConversationRole::Assistant => ChatMessage::Assistant {
-                    content: message.content,
-                },
-            })
-            .collect::<Vec<_>>();
-        initial_messages.push(ChatMessage::User {
-            content: goal.clone(),
-        });
         let run_id = Uuid::new_v4().to_string();
-        let now = self
-            .clock
-            .now()
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        let turn = AgentTurn {
-            id: run_id.clone(),
-            mode: serde_json::to_string(&mode)
-                .unwrap_or_else(|_| "\"chat\"".into())
-                .trim_matches('"')
-                .to_owned(),
-            notebook_id: None,
-            config_json: None,
-            goal: goal.clone(),
-            source_paths: source_paths.clone(),
-            allow_tools: tool_policy.allow_tools,
-            read_only: tool_policy.read_only,
-            history_json: serde_json::to_string(&initial_messages).unwrap_or_else(|_| "[]".into()),
-            status: "started".into(),
-            stage: None,
-            loop_index: 0,
-            last_sequence: 0,
-            result_json: None,
-            error: None,
-            checkpoint: "safe".into(),
-            resume_safe: true,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        let control = Arc::new(RunControl::new(run_id.clone(), turn));
+        let control = Arc::new(RunControl::new(run_id.clone()));
         {
             // The lock makes the check-and-reserve operation atomic across UI
             // calls racing to start two runs at the same time.
@@ -886,7 +496,6 @@ impl AgentRuntime {
             state.active_run = Some(run_id.clone());
             state.runs.insert(run_id.clone(), Arc::clone(&control));
         }
-        self.persist_turn(&control);
         let runtime = Arc::clone(self);
         // Keep the synchronous public API responsive while the current-thread
         // Tokio executor owns async model I/O and can select cancellation first.
@@ -902,96 +511,12 @@ impl AgentRuntime {
                         mode,
                         goal,
                         source_paths,
-                        initial_messages,
+                        history,
                         tool_policy,
                     )),
                     Err(error) => {
                         runtime.finish_with_error(&control, error.to_string());
                     }
-                }
-            })
-            .map_err(|error| AgentError::Runtime(error.to_string()))?;
-        Ok(run_id)
-    }
-
-    fn start_agent_from_messages(
-        self: &Arc<Self>,
-        mode: AgentMode,
-        goal: String,
-        requested_source_paths: Vec<String>,
-        messages: Vec<ChatMessage>,
-        tool_policy: ToolPolicy,
-    ) -> Result<String, AgentError> {
-        if goal.trim().is_empty() || messages.is_empty() {
-            return Err(AgentError::Runtime(
-                "resumed Agent turn is incomplete".into(),
-            ));
-        }
-        let source_paths = if tool_policy.allow_tools {
-            self.workspace
-                .list_selected_library_files(&requested_source_paths)
-                .map_err(|error| AgentError::Runtime(error.to_string()))?
-                .into_iter()
-                .map(|entry| entry.relative_path)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let run_id = Uuid::new_v4().to_string();
-        let now = self
-            .clock
-            .now()
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        let turn = AgentTurn {
-            id: run_id.clone(),
-            mode: serde_json::to_string(&mode)
-                .unwrap_or_else(|_| "\"chat\"".into())
-                .trim_matches('"')
-                .to_owned(),
-            notebook_id: None,
-            config_json: None,
-            goal: goal.clone(),
-            source_paths: source_paths.clone(),
-            allow_tools: tool_policy.allow_tools,
-            read_only: tool_policy.read_only,
-            history_json: serde_json::to_string(&messages).unwrap_or_else(|_| "[]".into()),
-            status: "started".into(),
-            stage: None,
-            loop_index: 0,
-            last_sequence: 0,
-            result_json: None,
-            error: None,
-            checkpoint: "safe".into(),
-            resume_safe: true,
-            created_at: now.clone(),
-            updated_at: now,
-        };
-        let control = Arc::new(RunControl::new(run_id.clone(), turn));
-        let mut state = self.state.lock();
-        if state.active_run.is_some() {
-            return Err(AgentError::Busy);
-        }
-        state.active_run = Some(run_id.clone());
-        state.runs.insert(run_id.clone(), Arc::clone(&control));
-        drop(state);
-        self.persist_turn(&control);
-        let runtime = Arc::clone(self);
-        thread::Builder::new()
-            .name(format!("studypulse-agent-{run_id}"))
-            .spawn(move || {
-                let executor = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                match executor {
-                    Ok(executor) => executor.block_on(runtime.run_agent(
-                        control,
-                        mode,
-                        goal,
-                        source_paths,
-                        messages,
-                        tool_policy,
-                    )),
-                    Err(error) => runtime.finish_with_error(&control, error.to_string()),
                 }
             })
             .map_err(|error| AgentError::Runtime(error.to_string()))?;
@@ -1094,26 +619,7 @@ impl AgentRuntime {
         // `after_sequence` is an exclusive cursor.  A bounded Condvar wait
         // avoids busy polling, and the terminal check lets callers return even
         // when no new event arrives after the final transition.
-        let control = match self.control(run_id) {
-            Ok(control) => control,
-            Err(AgentError::RunNotFound) => {
-                let turn = self
-                    .workspace
-                    .read_agent_turn(run_id)
-                    .map_err(|_| AgentError::RunNotFound)?;
-                let _ = turn;
-                let events = self
-                    .workspace
-                    .read_agent_run_log(run_id)
-                    .map_err(|error| AgentError::Runtime(error.to_string()))?
-                    .into_iter()
-                    .filter_map(|line| serde_json::from_str::<AgentEvent>(&line).ok())
-                    .filter(|event| event.sequence > after_sequence)
-                    .collect();
-                return Ok(events);
-            }
-            Err(error) => return Err(error),
-        };
+        let control = self.control(run_id)?;
         let mut buffer = control.events.lock();
         if !buffer
             .events
@@ -1140,7 +646,7 @@ impl AgentRuntime {
         mode: AgentMode,
         goal: String,
         source_paths: Vec<String>,
-        mut messages: Vec<ChatMessage>,
+        history: Vec<ConversationMessage>,
         tool_policy: ToolPolicy,
     ) {
         // This loop is the only place where a model response becomes a new
@@ -1159,8 +665,9 @@ impl AgentRuntime {
                 text: Some(goal.clone()),
                 mode: Some(mode),
                 stage: Some(
-                    self.capabilities
-                        .manifest(mode)
+                    capability_manifests()
+                        .into_iter()
+                        .find(|manifest| manifest.mode == mode)
                         .and_then(|manifest| manifest.stages.first().cloned())
                         .unwrap_or_else(|| "responding".into()),
                 ),
@@ -1178,7 +685,20 @@ impl AgentRuntime {
                 ..EventFields::default()
             },
         );
-        self.checkpoint_messages(&control, &messages, 0, "safe", true);
+        let mut messages = history
+            .into_iter()
+            .map(|message| match message.role {
+                ConversationRole::User => ChatMessage::User {
+                    content: message.content,
+                },
+                ConversationRole::Assistant => ChatMessage::Assistant {
+                    content: message.content,
+                },
+            })
+            .collect::<Vec<_>>();
+        // Tool messages are appended only after prepare/consent/execute has
+        // produced a result, keeping the transcript truthful for the next turn.
+        messages.push(ChatMessage::User { content: goal });
         // Permission is serialized as a hint for weaker models, not as an
         // authorization grant.  The host repeats the decision at prepare time.
         let definitions = if tool_policy.allow_tools {
@@ -1205,9 +725,9 @@ impl AgentRuntime {
             Vec::new()
         };
 
-        let manifest = self.capabilities.manifest(mode);
-        let max_loops = manifest
-            .as_ref()
+        let max_loops = capability_manifests()
+            .into_iter()
+            .find(|manifest| manifest.mode == mode)
             .map_or(MAX_AGENT_LOOPS, |manifest| manifest.max_loops as usize);
         // Each loop represents one model turn.  The cap prevents a faulty or
         // adversarial provider from creating an endless tool-call conversation.
@@ -1230,14 +750,12 @@ impl AgentRuntime {
                         .trim_matches('"')
                         .to_owned(),
                 ),
-                stages: manifest
-                    .as_ref()
-                    .map(|manifest| manifest.stages.clone())
+                stages: capability_manifests()
+                    .into_iter()
+                    .find(|manifest| manifest.mode == mode)
+                    .map(|manifest| manifest.stages)
                     .unwrap_or_default(),
             };
-            let prompt_characters = serde_json::to_string(&request.messages)
-                .map(|value| value.len())
-                .unwrap_or_default();
             self.emit(
                 &control,
                 AgentEventKind::StageProgress,
@@ -1313,12 +831,6 @@ impl AgentRuntime {
             }
 
             let streamed_text = streamed_text.lock().clone();
-            self.record_usage(
-                &control,
-                response.usage.as_ref(),
-                prompt_characters,
-                streamed_text.len() + response.text_deltas.iter().map(String::len).sum::<usize>(),
-            );
             // A provider can deliver text incrementally and also return the
             // complete text.  Emit only the suffix not already sent to the UI.
             let returned_text = response.text_deltas.concat();
@@ -1356,18 +868,10 @@ impl AgentRuntime {
                     content: assistant_text,
                 });
             }
-            self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
 
             if response.tool_calls.is_empty() {
                 // No tool call means the model turn is the final answer.  The
                 // terminal event is emitted only after the final stage marker.
-                if let Err(error) = self
-                    .capabilities
-                    .validate_result(mode, &control.final_text.lock())
-                {
-                    self.finish_with_error(&control, error);
-                    return;
-                }
                 self.emit(
                     &control,
                     AgentEventKind::StageCompleted,
@@ -1387,21 +891,10 @@ impl AgentRuntime {
                 return;
             }
 
-            // Read-only calls can use a bounded worker batch. Writes, deletes,
-            // execution, and interactive input stay sequential so no side
-            // effect can pass an unapproved or stale confirmation boundary.
-            if response.tool_calls.len() > 1
-                && self.dispatch_read_batch(
-                    &control,
-                    mode,
-                    loop_index,
-                    &response.tool_calls,
-                    &source_paths,
-                    &mut messages,
-                )
-            {
-                continue;
-            }
+            // Calls are handled sequentially even when the model returns a
+            // batch.  This preserves event order and ensures a later call in
+            // the batch cannot observe a write that the user has not yet
+            // approved or a cancellation that has not yet been checked.
             for call in response.tool_calls {
                 // Prepare is intentionally before every permission check: it
                 // validates arguments and creates a preview without touching
@@ -1416,7 +909,8 @@ impl AgentRuntime {
                     {
                         Ok(prepared) => prepared,
                         Err(error) => {
-                            let result = tool_error_result("invalid_arguments", &error.to_string());
+                            let result =
+                                json!({"ok": false, "error": error.to_string()}).to_string();
                             self.emit(
                                 &control,
                                 AgentEventKind::ToolCompleted,
@@ -1473,13 +967,6 @@ impl AgentRuntime {
                             ..EventFields::default()
                         },
                     );
-                    self.checkpoint_messages(
-                        &control,
-                        &messages,
-                        loop_index,
-                        "waiting_confirmation",
-                        true,
-                    );
                     let decision = self.wait_for_confirmation(&control);
                     if self.finish_if_cancelled(&control) {
                         return;
@@ -1507,7 +994,6 @@ impl AgentRuntime {
                             name: prepared.name,
                             content: result,
                         });
-                        self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
                         continue;
                     }
                 }
@@ -1544,7 +1030,7 @@ impl AgentRuntime {
                     let result = answer
                         .map(|answer| json!({"ok": true, "answer": answer}).to_string())
                         .unwrap_or_else(|| {
-                            tool_error_result("input_missing", "user did not answer")
+                            json!({"ok": false, "error": "user did not answer"}).to_string()
                         });
                     self.emit(
                         &control,
@@ -1561,7 +1047,6 @@ impl AgentRuntime {
                         name: prepared.name,
                         content: result,
                     });
-                    self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
                     continue;
                 }
 
@@ -1569,7 +1054,6 @@ impl AgentRuntime {
                 // model therefore sees success and failure through one
                 // protocol, instead of through host-only side channels that
                 // would make retries or explanations inconsistent.
-                self.checkpoint_messages(&control, &messages, loop_index, "executing_tool", false);
                 let result = self
                     // Only this execute path is allowed to perform the prepared
                     // invocation.  The selected Notebook sources are passed
@@ -1582,8 +1066,9 @@ impl AgentRuntime {
                         &source_paths,
                     )
                     .map(|value| value.to_string())
-                    .unwrap_or_else(|error| tool_error_result("tool_error", &error.to_string()));
-                self.collect_sources(&control, &prepared, &result);
+                    .unwrap_or_else(|error| {
+                        json!({"ok": false, "error": error.to_string()}).to_string()
+                    });
                 self.emit(
                     &control,
                     AgentEventKind::ToolCompleted,
@@ -1596,7 +1081,6 @@ impl AgentRuntime {
                     },
                 );
                 if prepared.name == "save_artifact" && result.contains("\"ok\":true") {
-                    self.collect_artifact(&control, &result);
                     self.emit(
                         &control,
                         AgentEventKind::ArtifactCreated,
@@ -1613,228 +1097,12 @@ impl AgentRuntime {
                     name: prepared.name,
                     content: result,
                 });
-                self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
             }
         }
         self.finish_with_error(
             &control,
             format!("Agent exceeded the maximum of {max_loops} model loops"),
         );
-    }
-
-    fn dispatch_read_batch(
-        &self,
-        control: &Arc<RunControl>,
-        mode: AgentMode,
-        loop_index: usize,
-        calls: &[ModelToolCall],
-        source_paths: &[String],
-        messages: &mut Vec<ChatMessage>,
-    ) -> bool {
-        // Only a batch made entirely of known read tools can enter this path.
-        // `ask_user` remains sequential because it changes the run state, and
-        // every write/execute operation remains behind the normal consent gate.
-        if calls.len() > MAX_PARALLEL_READ_TOOLS {
-            return false;
-        }
-        let definitions = self.tools.definitions();
-        if calls.iter().any(|call| {
-            call.name == "ask_user"
-                || definitions
-                    .iter()
-                    .find(|definition| definition.name == call.name)
-                    .is_none_or(|definition| definition.permission != PermissionLevel::Read)
-        }) {
-            return false;
-        }
-        let prepared = calls
-            .iter()
-            .map(|call| {
-                self.tools
-                    .prepare(call.id.clone(), &call.name, call.arguments.clone())
-            })
-            .collect::<Result<Vec<_>, _>>();
-        let Ok(prepared) = prepared else {
-            return false;
-        };
-        for (call, tool) in calls.iter().zip(&prepared) {
-            self.emit(
-                control,
-                AgentEventKind::ToolRequested,
-                EventFields {
-                    tool_call_id: Some(tool.call_id.clone()),
-                    tool_name: Some(tool.name.clone()),
-                    permission: Some(tool.permission),
-                    preview: Some(tool.preview.clone()),
-                    payload_json: Some(call.arguments.to_string()),
-                    ..EventFields::default()
-                },
-            );
-        }
-
-        let registry = self.tools.clone();
-        let workspace = self.workspace.clone();
-        let selected_sources = source_paths.to_vec();
-        let now = self.clock.now();
-        let handles = prepared
-            .iter()
-            .cloned()
-            .map(|tool| {
-                let registry = registry.clone();
-                let workspace = workspace.clone();
-                let selected_sources = selected_sources.clone();
-                std::thread::spawn(move || {
-                    registry
-                        .execute_for_sources(tool, &workspace, now, &selected_sources)
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|error| tool_error_result("tool_error", &error.to_string()))
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for (tool, handle) in prepared.into_iter().zip(handles) {
-            let result = handle
-                .join()
-                .unwrap_or_else(|_| tool_error_result("worker_panic", "read tool worker panicked"));
-            self.collect_sources(control, &tool, &result);
-            self.emit(
-                control,
-                AgentEventKind::ToolCompleted,
-                EventFields {
-                    tool_call_id: Some(tool.call_id.clone()),
-                    tool_name: Some(tool.name.clone()),
-                    permission: Some(tool.permission),
-                    payload_json: Some(result.clone()),
-                    ..EventFields::default()
-                },
-            );
-            messages.push(ChatMessage::Tool {
-                call_id: tool.call_id,
-                name: tool.name,
-                content: result,
-            });
-        }
-        self.emit(
-            control,
-            AgentEventKind::Observation,
-            EventFields {
-                mode: Some(mode),
-                stage: Some(stage_for(mode, loop_index)),
-                text: Some(format!(
-                    "Completed {} read-only tool calls in parallel",
-                    calls.len()
-                )),
-                ..EventFields::default()
-            },
-        );
-        self.checkpoint_messages(control, messages, loop_index, "safe", true);
-        true
-    }
-
-    fn collect_sources(
-        &self,
-        control: &Arc<RunControl>,
-        tool: &studypulse_tools::PreparedTool,
-        result: &str,
-    ) {
-        let Ok(value) = serde_json::from_str::<Value>(result) else {
-            return;
-        };
-        let Some(results) = value.get("results").and_then(Value::as_array) else {
-            if tool.name == "read_source" {
-                let locator = value
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if !locator.is_empty() {
-                    control.sources.lock().push(SourceRef {
-                        source_type: "workspace".into(),
-                        locator,
-                        title: None,
-                        excerpt: value
-                            .get("content")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        tool_call_id: Some(tool.call_id.clone()),
-                    });
-                }
-            }
-            return;
-        };
-        let mut sources = control.sources.lock();
-        for item in results {
-            let locator = item
-                .get("url")
-                .or_else(|| item.get("path"))
-                .or_else(|| item.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if locator.is_empty() {
-                continue;
-            }
-            sources.push(SourceRef {
-                source_type: item
-                    .get("source")
-                    .and_then(Value::as_str)
-                    .unwrap_or(if tool.name == "paper_search" {
-                        "paper"
-                    } else {
-                        "web"
-                    })
-                    .into(),
-                locator: locator.into(),
-                title: item.get("title").and_then(Value::as_str).map(str::to_owned),
-                excerpt: item
-                    .get("snippet")
-                    .or_else(|| item.get("abstract"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                tool_call_id: Some(tool.call_id.clone()),
-            });
-        }
-        if let Ok(payload) = serde_json::to_string(&*sources) {
-            drop(sources);
-            self.emit(
-                control,
-                AgentEventKind::Sources,
-                EventFields {
-                    tool_call_id: Some(tool.call_id.clone()),
-                    tool_name: Some(tool.name.clone()),
-                    payload_json: Some(payload),
-                    ..EventFields::default()
-                },
-            );
-        }
-    }
-
-    fn collect_artifact(&self, control: &Arc<RunControl>, result: &str) {
-        let Ok(value) = serde_json::from_str::<Value>(result) else {
-            return;
-        };
-        let Some(path) = value.get("relative_path").and_then(Value::as_str) else {
-            return;
-        };
-        let file_name = path.rsplit('/').next().unwrap_or(path);
-        let Some((artifact_id, extension)) = file_name.rsplit_once('.') else {
-            return;
-        };
-        control.artifacts.lock().push(ArtifactRef {
-            artifact_id: value
-                .get("artifact_id")
-                .and_then(Value::as_str)
-                .unwrap_or(artifact_id)
-                .into(),
-            path: path.into(),
-            extension: extension.into(),
-            render_type: match extension {
-                "svg" => Some("svg".into()),
-                "html" => Some("html".into()),
-                "json" => Some("structured".into()),
-                "md" | "markdown" => Some("markdown".into()),
-                _ => None,
-            },
-        });
     }
 
     fn wait_for_confirmation(&self, control: &RunControl) -> Option<ConfirmationDecision> {
@@ -1924,56 +1192,6 @@ impl AgentRuntime {
         // event, release the single-active slot, and wake any event/consent
         // waiter that may still be observing the run.
         *control.status.lock() = status;
-        let usage_json = serde_json::to_string(&*control.usage.lock()).ok();
-        self.emit(
-            control,
-            AgentEventKind::Usage,
-            EventFields {
-                payload_json: usage_json,
-                ..EventFields::default()
-            },
-        );
-        if status == RunStatus::Completed {
-            let text = control.final_text.lock().clone();
-            let output_json = serde_json::from_str::<Value>(text.trim())
-                .ok()
-                .map(|value| value.to_string());
-            {
-                let mut turn = control.turn.lock();
-                turn.result_json = output_json;
-                turn.checkpoint = "completed".into();
-                turn.resume_safe = false;
-                turn.updated_at = self
-                    .clock
-                    .now()
-                    .to_rfc3339_opts(SecondsFormat::Millis, true);
-                let snapshot = turn.clone();
-                drop(turn);
-                let _ = self.workspace.write_agent_turn(&snapshot);
-            }
-            if let Ok(result) = serde_json::to_string(&self.turn_result(control)) {
-                self.emit(
-                    control,
-                    AgentEventKind::Result,
-                    EventFields {
-                        payload_json: Some(result),
-                        ..EventFields::default()
-                    },
-                );
-            }
-        } else {
-            let mut turn = control.turn.lock();
-            turn.error = text.clone();
-            turn.checkpoint = "terminal".into();
-            turn.resume_safe = false;
-            turn.updated_at = self
-                .clock
-                .now()
-                .to_rfc3339_opts(SecondsFormat::Millis, true);
-            let snapshot = turn.clone();
-            drop(turn);
-            let _ = self.workspace.write_agent_turn(&snapshot);
-        }
         self.emit(
             control,
             kind,
@@ -2034,28 +1252,6 @@ impl AgentRuntime {
             stage: fields.stage,
             progress: fields.progress,
         };
-        {
-            let mut turn = control.turn.lock();
-            turn.last_sequence = event.sequence;
-            if let Some(status) = event.status {
-                turn.status = serde_json::to_string(&status)
-                    .unwrap_or_else(|_| "\"running\"".into())
-                    .trim_matches('"')
-                    .to_owned();
-            }
-            if event.stage.is_some() {
-                turn.stage = event.stage.clone();
-            }
-            turn.updated_at = event.timestamp.clone();
-            let snapshot = turn.clone();
-            drop(turn);
-            let _ = self.workspace.write_agent_turn(&snapshot);
-        }
-        if event.kind == AgentEventKind::TextDelta
-            && let Some(text) = &event.text
-        {
-            control.final_text.lock().push_str(text);
-        }
         self.persist_event(&event);
         control.events.lock().events.push(event);
         control.events_changed.notify_all();
@@ -2068,84 +1264,17 @@ impl AgentRuntime {
         // Persistence is append-only and best-effort here; the in-memory event
         // stream remains the synchronization source while JSONL enables later
         // inspection of a run without changing its live state machine.
-        if let Ok(line) = serde_json::to_string(event) {
-            let _ = self.workspace.append_agent_run_log(&event.run_id, &line);
+        let path = self
+            .workspace
+            .root()
+            .join("Agent/runs")
+            .join(format!("{}.jsonl", event.run_id));
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+            && serde_json::to_writer(&mut file, event).is_ok()
+        {
+            let _ = file.write_all(b"\n");
+            let _ = file.flush();
         }
-    }
-
-    fn persist_turn(&self, control: &Arc<RunControl>) {
-        let turn = control.turn.lock().clone();
-        let _ = self.workspace.write_agent_turn(&turn);
-    }
-
-    fn record_usage(
-        &self,
-        control: &Arc<RunControl>,
-        usage: Option<&ModelUsage>,
-        prompt_characters: usize,
-        completion_characters: usize,
-    ) {
-        let mut summary = control.usage.lock();
-        let value = usage.cloned().unwrap_or_else(|| {
-            let prompt_tokens = (prompt_characters as u64).div_ceil(4);
-            let completion_tokens = (completion_characters as u64).div_ceil(4);
-            ModelUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens.saturating_add(completion_tokens),
-                estimated: true,
-            }
-        });
-        summary.prompt_tokens = summary.prompt_tokens.saturating_add(value.prompt_tokens);
-        summary.completion_tokens = summary
-            .completion_tokens
-            .saturating_add(value.completion_tokens);
-        summary.total_tokens = summary.total_tokens.saturating_add(value.total_tokens);
-        summary.model_calls = summary.model_calls.saturating_add(1);
-        summary.estimated |= value.estimated;
-    }
-
-    fn turn_result(&self, control: &Arc<RunControl>) -> TurnResult {
-        let turn = control.turn.lock().clone();
-        let mode = serde_json::from_str::<AgentMode>(&format!("\"{}\"", turn.mode))
-            .unwrap_or(AgentMode::Chat);
-        let result_kind = self
-            .capabilities
-            .manifest(mode)
-            .map(|manifest| manifest.result_kind)
-            .unwrap_or_else(|| "markdown".into());
-        TurnResult {
-            schema_version: TURN_RESULT_SCHEMA_VERSION,
-            mode,
-            result_kind,
-            text: control.final_text.lock().clone(),
-            output_json: turn.result_json.clone(),
-            sources: control.sources.lock().clone(),
-            artifacts: control.artifacts.lock().clone(),
-            usage: control.usage.lock().clone(),
-        }
-    }
-
-    fn checkpoint_messages(
-        &self,
-        control: &Arc<RunControl>,
-        messages: &[ChatMessage],
-        loop_index: usize,
-        checkpoint: &str,
-        resume_safe: bool,
-    ) {
-        let mut turn = control.turn.lock();
-        turn.history_json = serde_json::to_string(messages).unwrap_or_else(|_| "[]".into());
-        turn.loop_index = loop_index as u32;
-        turn.checkpoint = checkpoint.into();
-        turn.resume_safe = resume_safe;
-        turn.updated_at = self
-            .clock
-            .now()
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        let snapshot = turn.clone();
-        drop(turn);
-        let _ = self.workspace.write_agent_turn(&snapshot);
     }
 
     fn control(&self, run_id: &str) -> Result<Arc<RunControl>, AgentError> {
@@ -2160,109 +1289,6 @@ impl AgentRuntime {
             .cloned()
             .ok_or(AgentError::RunNotFound)
     }
-}
-
-fn json_payload(text: &str) -> Option<Value> {
-    let trimmed = text.trim();
-    let candidate = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .and_then(|value| value.strip_suffix("```"))
-        .map(str::trim)
-        .unwrap_or(trimmed);
-    serde_json::from_str(candidate).ok().or_else(|| {
-        let start = candidate.find('{')?;
-        let end = candidate.rfind('}')?;
-        serde_json::from_str(&candidate[start..=end]).ok()
-    })
-}
-
-fn tool_error_result(code: &str, message: &str) -> String {
-    json!({
-        "ok": false,
-        "error": {"code": code, "message": message}
-    })
-    .to_string()
-}
-
-fn validate_capability_result(mode: AgentMode, text: &str) -> Result<(), String> {
-    match mode {
-        AgentMode::QuestionLab => {
-            let value = json_payload(text).ok_or_else(|| {
-                "Question Lab must return a JSON object with a questions array".to_owned()
-            })?;
-            let questions = value
-                .get("questions")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "Question Lab result is missing questions".to_owned())?;
-            if questions.is_empty() || questions.len() > 100 {
-                return Err("Question Lab must contain between 1 and 100 questions".into());
-            }
-            for question in questions {
-                let object = question
-                    .as_object()
-                    .ok_or_else(|| "each Question Lab item must be an object".to_owned())?;
-                let prompt = object
-                    .get("prompt")
-                    .or_else(|| object.get("question"))
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| "each question needs a non-empty prompt".to_owned())?;
-                if prompt.len() > 20_000 {
-                    return Err("question prompt exceeds the 20,000 character limit".into());
-                }
-                let options = object
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| "each question needs an options array".to_owned())?;
-                if !(2..=8).contains(&options.len()) {
-                    return Err("question options must contain between 2 and 8 items".into());
-                }
-                if object.get("answer").is_none() && object.get("correctAnswer").is_none() {
-                    return Err("each question needs an answer".into());
-                }
-            }
-            Ok(())
-        }
-        AgentMode::Visualize => {
-            if let Some(value) = json_payload(text) {
-                let render_type = value
-                    .get("renderType")
-                    .or_else(|| value.get("render_type"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("markdown")
-                    .to_ascii_lowercase();
-                if !matches!(
-                    render_type.as_str(),
-                    "mermaid" | "svg" | "chart" | "chartjs" | "html" | "markdown"
-                ) {
-                    return Err("Visualize returned an unsupported render type".into());
-                }
-                let content = value
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                reject_active_visual_content(content)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn reject_active_visual_content(content: &str) -> Result<(), String> {
-    let lowered = content.to_ascii_lowercase();
-    let compact = lowered
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    if ["<script", "javascript:", "onload=", "onclick=", "onerror="]
-        .iter()
-        .any(|needle| compact.contains(needle))
-    {
-        return Err("Visualize content contains executable markup".into());
-    }
-    Ok(())
 }
 
 // EventFields keeps construction sites readable while preserving one stable
@@ -2437,226 +1463,6 @@ mod tests {
         assert_eq!(manifests[6].mode, AgentMode::Coach);
         assert_eq!(manifests[8].mode, AgentMode::ReversePlanner);
         assert!(manifests.iter().all(|manifest| !manifest.stages.is_empty()));
-        assert_eq!(manifests[3].result_kind, "research_report");
-        assert!(manifests[4].tools_used.contains(&"save_artifact".into()));
-        assert!(serde_json::from_str::<Value>(&manifests[3].request_schema_json).is_ok());
-    }
-
-    #[derive(Debug, Default)]
-    struct BatchReadModel {
-        calls: Mutex<u32>,
-    }
-
-    #[async_trait]
-    impl ModelClient for BatchReadModel {
-        async fn complete(
-            &self,
-            _request: ModelRequest,
-            _on_text_delta: ModelTextDeltaHandler,
-        ) -> Result<ModelResponse, ModelError> {
-            let mut calls = self.calls.lock();
-            if *calls == 0 {
-                *calls += 1;
-                Ok(ModelResponse {
-                    text_deltas: Vec::new(),
-                    tool_calls: vec![
-                        ModelToolCall {
-                            id: "read-files".into(),
-                            name: "list_workspace_files".into(),
-                            arguments: json!({}),
-                        },
-                        ModelToolCall {
-                            id: "read-tasks".into(),
-                            name: "get_tasks".into(),
-                            arguments: json!({}),
-                        },
-                    ],
-                    usage: None,
-                })
-            } else {
-                Ok(ModelResponse {
-                    text_deltas: vec!["Parallel reads are complete".into()],
-                    tool_calls: Vec::new(),
-                    usage: None,
-                })
-            }
-        }
-    }
-
-    #[test]
-    fn parallel_read_batch_returns_observation_and_preserves_tool_results() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
-        let runtime = AgentRuntime::with_clock(
-            workspace,
-            Arc::new(BatchReadModel::default()),
-            Arc::new(FixedClock),
-        );
-        let run_id = runtime
-            .start_agent("Inspect the workspace".into(), Vec::new(), Vec::new())
-            .unwrap();
-        let events = wait_for_terminal(&runtime, &run_id);
-        assert!(
-            events
-                .iter()
-                .any(|event| event.kind == AgentEventKind::Observation)
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.kind == AgentEventKind::ToolCompleted)
-                .count(),
-            2
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| event.kind == AgentEventKind::Result)
-        );
-    }
-
-    #[derive(Debug)]
-    struct UsageModel;
-
-    #[async_trait]
-    impl ModelClient for UsageModel {
-        async fn complete(
-            &self,
-            _request: ModelRequest,
-            _on_text_delta: ModelTextDeltaHandler,
-        ) -> Result<ModelResponse, ModelError> {
-            Ok(ModelResponse {
-                text_deltas: vec!["Measured answer".into()],
-                tool_calls: Vec::new(),
-                usage: Some(ModelUsage {
-                    prompt_tokens: 11,
-                    completion_tokens: 7,
-                    total_tokens: 18,
-                    estimated: false,
-                }),
-            })
-        }
-    }
-
-    #[test]
-    fn usage_and_result_are_persisted_as_structured_events() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
-        let runtime = AgentRuntime::with_clock(
-            workspace.clone(),
-            Arc::new(UsageModel),
-            Arc::new(FixedClock),
-        );
-        let run_id = runtime
-            .start_turn(TurnRequest {
-                mode: AgentMode::Visualize,
-                goal: "Explain the cycle".into(),
-                source_paths: Vec::new(),
-                history: Vec::new(),
-                notebook_id: None,
-                config_json: None,
-            })
-            .unwrap();
-        let events = wait_for_terminal(&runtime, &run_id);
-        let usage = events
-            .iter()
-            .find(|event| event.kind == AgentEventKind::Usage)
-            .and_then(|event| event.payload_json.as_deref())
-            .and_then(|payload| serde_json::from_str::<UsageSummary>(payload).ok())
-            .unwrap();
-        assert_eq!(usage.total_tokens, 18);
-        let result = runtime.turn_result_for_run(&run_id).unwrap();
-        assert_eq!(result.result_kind, "visualization");
-        assert_eq!(result.text, "Measured answer");
-        assert_eq!(
-            workspace.read_agent_turn(&run_id).unwrap().status,
-            "completed"
-        );
-    }
-
-    #[derive(Debug)]
-    struct QuestionModel;
-
-    #[async_trait]
-    impl ModelClient for QuestionModel {
-        async fn complete(
-            &self,
-            _request: ModelRequest,
-            _on_text_delta: ModelTextDeltaHandler,
-        ) -> Result<ModelResponse, ModelError> {
-            Ok(ModelResponse {
-                text_deltas: vec![
-                    json!({
-                        "questions": [{
-                            "prompt": "2 + 2 = ?",
-                            "options": ["3", "4"],
-                            "answer": "4",
-                            "explanation": "Addition"
-                        }]
-                    })
-                    .to_string(),
-                ],
-                tool_calls: Vec::new(),
-                usage: None,
-            })
-        }
-    }
-
-    #[test]
-    fn question_lab_requires_and_persists_a_valid_question_set() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
-        let runtime =
-            AgentRuntime::with_clock(workspace, Arc::new(QuestionModel), Arc::new(FixedClock));
-        let run_id = runtime
-            .start_agent_with_mode(
-                AgentMode::QuestionLab,
-                "Generate one arithmetic question".into(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap();
-        let events = wait_for_terminal(&runtime, &run_id);
-        assert!(
-            events
-                .iter()
-                .any(|event| event.kind == AgentEventKind::Completed)
-        );
-        assert!(
-            runtime
-                .turn_result_for_run(&run_id)
-                .unwrap()
-                .output_json
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn persisted_events_are_replayable_after_runtime_recreation() {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
-        let first = AgentRuntime::with_clock(
-            workspace.clone(),
-            Arc::new(RecordingModel::default()),
-            Arc::new(FixedClock),
-        );
-        let run_id = first
-            .start_agent("Persist this run".into(), Vec::new(), Vec::new())
-            .unwrap();
-        let original = wait_for_terminal(&first, &run_id);
-        drop(first);
-        let reopened = AgentRuntime::with_clock(
-            workspace,
-            Arc::new(RecordingModel::default()),
-            Arc::new(FixedClock),
-        );
-        let replayed = reopened.wait_for_events(&run_id, 0, 0).unwrap();
-        assert_eq!(replayed.len(), original.len());
-        assert!(
-            replayed
-                .iter()
-                .any(|event| event.kind == AgentEventKind::Completed)
-        );
     }
 
     #[test]
@@ -2751,7 +1557,6 @@ mod tests {
             Ok(ModelResponse {
                 text_deltas: vec!["Next answer".into()],
                 tool_calls: Vec::new(),
-                usage: None,
             })
         }
     }
@@ -2852,7 +1657,6 @@ mod tests {
                     name: "get_tasks".into(),
                     arguments: json!({}),
                 }],
-                usage: None,
             })
         }
     }

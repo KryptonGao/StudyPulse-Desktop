@@ -6,8 +6,6 @@ import type {
   AgentMessage,
   AgentMode,
   AgentNotebook,
-  AgentTurn,
-  TurnResult,
   AiAttachment,
   AiFeatureCaller,
   AiFeatureDiagnostics,
@@ -128,11 +126,6 @@ export const core = {
   // owns tool permissions, confirmations, and event persistence.
   startAgent: (input: { mode: AgentMode; goal: string; sourcePaths: string[]; history: AgentMessage[] }) =>
     command<string>("start_agent", { input: { mode: input.mode, goal: input.goal, source_paths: input.sourcePaths, history: input.history } }),
-  startTurn: (input: { mode: AgentMode; goal: string; sourcePaths: string[]; history: AgentMessage[]; notebookId?: string; configJson?: string }) =>
-    command<string>("start_turn", { request: { mode: input.mode, goal: input.goal, source_paths: input.sourcePaths, history: input.history, notebook_id: input.notebookId ?? null, config_json: input.configJson ?? null } }),
-  agentTurns: () => command<AgentTurn[]>("list_agent_turns"),
-  resumeAgentTurn: (turnId: string) => command<string>("resume_agent_turn", { turnId }),
-  agentTurnResult: (runId: string) => command<TurnResult>("get_agent_turn_result", { runId }),
   runAiFeature: async <T>(input: { caller: AiFeatureCaller; context: unknown; sourcePaths?: string[]; history?: AgentMessage[]; attachments?: AiAttachment[] }) =>
     JSON.parse(await command<string>("run_ai_feature", {
       request: {

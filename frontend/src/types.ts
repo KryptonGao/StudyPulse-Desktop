@@ -23,11 +23,6 @@ export type AgentEventKind =
   | "StageCompleted"
   | "InputRequired"
   | "ArtifactCreated"
-  | "Observation"
-  | "Sources"
-  | "Result"
-  | "Usage"
-  | "TurnRecovered"
   | "Failed"
   | "Cancelled"
   | "Completed";
@@ -481,9 +476,6 @@ export interface AgentMessage {
   role: "User" | "Assistant";
   content: string;
   created_at: string;
-  turn_id?: string | null;
-  source_refs_json?: string | null;
-  artifact_refs_json?: string | null;
 }
 
 export interface AgentNotebook {
@@ -506,59 +498,6 @@ export interface CapabilityManifest {
   description: string;
   stages: string[];
   max_loops: number;
-  tools_used: string[];
-  result_kind: string;
-  request_schema_json: string;
-  config_defaults_json: string;
-}
-
-export interface AgentTurn {
-  id: string;
-  mode: string;
-  goal: string;
-  status: string;
-  stage: string | null;
-  loop_index: number;
-  last_sequence: number;
-  resume_safe: boolean;
-  checkpoint: string;
-  error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SourceRef {
-  source_type: string;
-  locator: string;
-  title: string | null;
-  excerpt: string | null;
-  tool_call_id: string | null;
-}
-
-export interface ArtifactRef {
-  artifact_id: string;
-  path: string;
-  extension: string;
-  render_type: string | null;
-}
-
-export interface UsageSummary {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  model_calls: number;
-  estimated: boolean;
-}
-
-export interface TurnResult {
-  schema_version: number;
-  mode: AgentMode;
-  result_kind: string;
-  text: string;
-  output_json: string | null;
-  sources: SourceRef[];
-  artifacts: ArtifactRef[];
-  usage: UsageSummary;
 }
 
 export interface AgentEvent {
