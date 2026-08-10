@@ -8,7 +8,7 @@ import { pythonCodeForCompletedEvent, pythonCodeForConfirmation } from "../lib/a
 import { core, chooseBackupExportPath, chooseBackupToInspect, chooseDirectory, chooseSourceFiles, chooseWorkspaceToCreate, isDesktop } from "../lib/core";
 import { languageLocale, localizeEnum, useI18n, type Translate } from "../i18n";
 import { detectVisualTheme, saveVisualTheme, type VisualTheme } from "../theme";
-import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AppSnapshot, ComprehensiveExam, Exam, Grade, SessionIntensity, TimeInvestmentSubject } from "../types";
+import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AgentTurn, AppSnapshot, ArtifactRef, ComprehensiveExam, Exam, Grade, SessionIntensity, SourceRef, TimeInvestmentSubject, UsageSummary } from "../types";
 import { DiaryPage, FlashcardsPage, TrendsPage } from "./P1Pages";
 import { CoachPage, ExamSimulationPage, ReportsPage, ReversePlannerPage } from "./P2Pages";
 
@@ -106,7 +106,7 @@ function eventLabel(t: Translate, value: AgentEventKind): string {
   // readable text rather than becoming a blank or untranslated label.
   const key = value.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase().replaceAll("_", "");
   const keyMap: Record<string, string> = {
-    started: "started", statuschanged: "statusChanged", textdelta: "textDelta", toolrequested: "toolRequested", toolcompleted: "toolCompleted", confirmationrequired: "confirmationRequired", stagestarted: "stageStarted", stageprogress: "stageProgress", stagecompleted: "stageCompleted", inputrequired: "inputRequired", artifactcreated: "artifactCreated", failed: "failed", cancelled: "cancelled", completed: "completed",
+    started: "started", statuschanged: "statusChanged", textdelta: "textDelta", toolrequested: "toolRequested", toolcompleted: "toolCompleted", confirmationrequired: "confirmationRequired", stagestarted: "stageStarted", stageprogress: "stageProgress", stagecompleted: "stageCompleted", inputrequired: "inputRequired", artifactcreated: "artifactCreated", observation: "observation", sources: "sources", result: "result", usage: "usage", turnrecovered: "turnRecovered", failed: "failed", cancelled: "cancelled", completed: "completed",
   };
   return t(`event.${keyMap[key] ?? ""}`) === `event.${keyMap[key] ?? ""}` ? value.replaceAll("_", " ") : t(`event.${keyMap[key]}`);
 }
@@ -123,6 +123,13 @@ function AgentTimelineEvent({ event, events, language, t }: { event: AgentEvent;
   // the already-rendered timeline to recover matching code by tool call id.
   const pythonCode = pythonCodeForCompletedEvent(event, events);
   return <div className="timeline-item"><span className={`timeline-dot kind-${event.kind.toLowerCase()}`} /><div><strong>{eventLabel(t, event.kind)}</strong><span>{event.tool_name ?? event.stage ?? event.preview ?? formatDate(event.timestamp, language)}</span>{pythonCode && <PythonCode source={pythonCode} />}</div></div>;
+}
+
+interface ConsumedRun {
+  text: string;
+  sources: SourceRef[];
+  artifacts: ArtifactRef[];
+  usage?: UsageSummary;
 }
 
 export default function App() {
@@ -244,7 +251,7 @@ export default function App() {
         </nav>
         <div className="sidebar-bottom"><button className={`nav-item ${page === "settings" ? "active" : ""}`} onClick={() => setPage("settings")}><SidebarIcon name="settings" />{t("nav.settings")}</button><div className="local-note"><span className="status-dot" /> {t("local.stored")}</div></div>
       </aside>
-      <main className="main-column">
+      <main className={`main-column ${page === "agent" ? "agent-host" : ""}`}>
         <header className="topbar"><div><p className="eyebrow">{page === "today" ? t("top.learningRhythm") : pageLabel(t, page)}</p><h1>{page === "today" ? t("top.greeting") : pageLabel(t, page)}</h1></div><div className="topbar-actions"><button className="button subtle" onClick={() => void importBackup()}>{t("top.importBackup")}</button><button className="button subtle" onClick={() => void exportBackup()}>{t("top.exportBackup")}</button><button className="avatar">{snapshot.data?.provider.cloud_account?.email?.slice(0, 1).toUpperCase() ?? "•"}</button></div></header>
         {/* Page components own their resource queries. App only selects the
             active branch and passes the minimum cross-page provider context. */}
@@ -492,6 +499,7 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
   const notebooksQuery = useQuery({ queryKey: ["notebooks"], queryFn: core.notebooks });
   const filesQuery = useQuery({ queryKey: ["library"], queryFn: core.library });
   const capabilitiesQuery = useQuery({ queryKey: ["capabilities"], queryFn: core.capabilities });
+  const turnsQuery = useQuery({ queryKey: ["agent-turns"], queryFn: core.agentTurns });
   const [selectedId, setSelectedId] = useState<string>();
   const [mode, setMode] = useState<AgentMode>("Chat");
   const [goal, setGoal] = useState("");
@@ -503,6 +511,10 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
   const [pending, setPending] = useState<AgentEvent>();
   const [pendingInput, setPendingInput] = useState("");
   const [activity, setActivity] = useState<string>();
+  const [sources, setSources] = useState<SourceRef[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactRef[]>([]);
+  const [usage, setUsage] = useState<UsageSummary>();
+  const [structuredOutput, setStructuredOutput] = useState<Record<string, unknown> | null>(null);
   // Notebook metadata and source selection are local workspace records. The
   // provider flag only gates starting an Agent run; reading local notebooks
   // remains available without an AI connection.
@@ -512,6 +524,7 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
   const selectedMessages = selected?.messages ?? [];
   const files = (filesQuery.data ?? []).filter((file) => !file.is_directory);
   const canRun = Boolean(provider?.cloud_account || provider?.byok_config);
+  const recoverableTurn = (turnsQuery.data ?? []).find((turn) => turn.status === "recoverable" && turn.resume_safe);
 
   async function persist(next: AgentNotebook[]) {
     // Persistence is explicit because the notebook is not a React Query
@@ -538,6 +551,63 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
     if (selected) await persist(notebooks.map((notebook) => notebook.id === selected.id ? { ...notebook, source_paths: nextPaths, updated_at: new Date().toISOString() } : notebook));
   }
 
+  async function consumeRun(id: string): Promise<ConsumedRun> {
+    // The event reducer keeps structured payloads separate from visible text:
+    // no arbitrary HTML is injected, while sources, artifacts, and usage can
+    // be rendered as typed UI metadata after a reconnect or replay.
+    let cursor = 0;
+    let assembled = "";
+    let collectedSources: SourceRef[] = [];
+    let collectedArtifacts: ArtifactRef[] = [];
+    let collectedUsage: UsageSummary | undefined;
+    let finished = false;
+    while (!finished) {
+      const batch = await core.waitAgentEvents(id, cursor, 1000);
+      for (const event of batch) {
+        cursor = Math.max(cursor, event.sequence);
+        setEvents((current) => [...current, event]);
+        if (event.stage) setActivity(event.stage);
+        if (event.kind === "TextDelta") { assembled += event.text ?? ""; setAnswer(assembled); }
+        if (event.kind === "Sources" && event.payload_json) {
+          try { collectedSources = JSON.parse(event.payload_json) as SourceRef[]; setSources(collectedSources); } catch { /* keep the last valid source snapshot */ }
+        }
+        if (event.kind === "Usage" && event.payload_json) {
+          try { collectedUsage = JSON.parse(event.payload_json) as UsageSummary; setUsage(collectedUsage); } catch { /* keep the last valid usage snapshot */ }
+        }
+        if (event.kind === "ArtifactCreated" && event.payload_json) {
+          try {
+            const value = JSON.parse(event.payload_json) as { artifact_id?: string; relative_path?: string };
+            if (value.artifact_id && value.relative_path) {
+              const extension = value.relative_path.split(".").at(-1) ?? "";
+              const artifact: ArtifactRef = { artifact_id: value.artifact_id, path: value.relative_path, extension, render_type: extension === "svg" || extension === "html" ? extension : null };
+              collectedArtifacts = collectedArtifacts.some((item) => item.path === artifact.path) ? collectedArtifacts : [...collectedArtifacts, artifact];
+              setArtifacts(collectedArtifacts);
+            }
+          } catch { /* artifact rendering remains text-only on malformed payloads */ }
+        }
+        if (event.kind === "Result" && event.payload_json) {
+          try {
+            const result = JSON.parse(event.payload_json) as { text?: string; output_json?: string | null; sources?: SourceRef[]; artifacts?: ArtifactRef[]; usage?: UsageSummary };
+            if (result.text) { assembled = result.text; setAnswer(result.text); }
+            if (result.output_json) {
+              try {
+                const parsed = JSON.parse(result.output_json) as unknown;
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) setStructuredOutput(parsed as Record<string, unknown>);
+              } catch { /* structured views fall back to the sanitized text */ }
+            }
+            if (result.sources) { collectedSources = result.sources; setSources(collectedSources); }
+            if (result.artifacts) { collectedArtifacts = result.artifacts; setArtifacts(collectedArtifacts); }
+            if (result.usage) { collectedUsage = result.usage; setUsage(collectedUsage); }
+          } catch { /* the streamed text remains the safe fallback */ }
+        }
+        if ((event.kind === "ConfirmationRequired" || event.kind === "ToolRequested") && event.confirmation_id) setPending(event);
+        if (event.kind === "InputRequired") setPending(event);
+        if (["Failed", "Cancelled", "Completed"].includes(event.kind)) finished = true;
+      }
+    }
+    return { text: assembled, sources: collectedSources, artifacts: collectedArtifacts, usage: collectedUsage };
+  }
+
   async function runAgent() {
     // The user message is persisted optimistically before the run starts so a
     // crash or model error does not discard the prompt from notebook history.
@@ -551,31 +621,14 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
     const userMessage: AgentMessage = { id: crypto.randomUUID(), role: "User", content: trimmed, created_at: new Date().toISOString() };
     const optimisticNotebook = { ...notebook, source_paths: effectiveSourcePaths, messages: [...history, userMessage], last_goal: trimmed, last_answer: "", updated_at: new Date().toISOString() };
     await persist(notebookList.map((value) => value.id === notebook!.id ? optimisticNotebook : value));
-    setGoal(""); setAnswer(""); setEvents([]); setPending(undefined); setActivity(t("agent.starting")); setRunning(true);
+    setGoal(""); setAnswer(""); setEvents([]); setSources([]); setArtifacts([]); setUsage(undefined); setStructuredOutput(null); setPending(undefined); setActivity(t("agent.starting")); setRunning(true);
     try {
-      const id = await core.startAgent({ mode, goal: trimmed, sourcePaths: effectiveSourcePaths, history });
+      const id = await core.startTurn({ mode, goal: trimmed, sourcePaths: effectiveSourcePaths, history, notebookId: notebook.id });
       setRunId(id);
-      // Core returns only events with sequence > cursor. `cursor` therefore
-      // advances by max sequence, never by batch length or array index.
-      let cursor = 0;
-      let assembled = "";
-      let finished = false;
-      while (!finished) {
-        const batch = await core.waitAgentEvents(id, cursor, 1000);
-        for (const event of batch) {
-          cursor = Math.max(cursor, event.sequence);
-          setEvents((current) => [...current, event]);
-          if (event.stage) setActivity(event.stage);
-          if (event.kind === "TextDelta") { assembled += event.text ?? ""; setAnswer(assembled); }
-          if ((event.kind === "ConfirmationRequired" || event.kind === "ToolRequested") && event.confirmation_id) setPending(event);
-          if (event.kind === "InputRequired") setPending(event);
-          // These are the terminal Agent events; confirmation/input events
-          // pause the run but do not end the polling loop.
-          if (["Failed", "Cancelled", "Completed"].includes(event.kind)) finished = true;
-        }
-      }
-      const assistant: AgentMessage = { id: crypto.randomUUID(), role: "Assistant", content: assembled, created_at: new Date().toISOString() };
-      await persist(notebookList.map((value) => value.id === notebook!.id ? { ...optimisticNotebook, messages: [...optimisticNotebook.messages, assistant], last_answer: assembled, updated_at: new Date().toISOString() } : value));
+      const completed = await consumeRun(id);
+      const assistant: AgentMessage = { id: crypto.randomUUID(), role: "Assistant", content: completed.text, created_at: new Date().toISOString(), turn_id: id, source_refs_json: JSON.stringify(completed.sources), artifact_refs_json: JSON.stringify(completed.artifacts) };
+      await persist(notebookList.map((value) => value.id === notebook!.id ? { ...optimisticNotebook, messages: [...optimisticNotebook.messages, assistant], last_answer: completed.text, updated_at: new Date().toISOString() } : value));
+      await queryClient.invalidateQueries({ queryKey: ["agent-turns"] });
       setAnswer("");
       setActivity(t("agent.completed"));
     } catch (error) { setActivity(errorMessage(error, t)); } finally { setRunning(false); setPending(undefined); setRunId(undefined); }
@@ -586,11 +639,120 @@ function AgentPage({ workspaceId, provider }: { workspaceId: string; provider?: 
   async function resolveConfirmation(decision: "Allow" | "Deny") { if (!pending?.confirmation_id || !runId) return; await core.submitConfirmation(runId, pending.confirmation_id, decision); setPending(undefined); }
   async function resolveInput() { if (!pending?.confirmation_id || !runId) return; const answerJson = JSON.stringify({ answer: pendingInput }); await core.submitAgentInput(runId, pending.confirmation_id, answerJson); setPending(undefined); setPendingInput(""); }
   async function cancel() { if (runId) await core.cancelAgent(runId); }
+  async function resumeTurn(turn: AgentTurn) {
+    if (running) return;
+    const storedMode: Record<string, AgentMode> = { chat: "Chat", deep_solve: "DeepSolve", mastery: "Mastery", deep_research: "DeepResearch", question_lab: "QuestionLab", visualize: "Visualize", coach: "Coach", exam_simulation: "ExamSimulation", reverse_planner: "ReversePlanner" };
+    setMode(storedMode[turn.mode] ?? mode);
+    setRunning(true); setEvents([]); setSources([]); setArtifacts([]); setUsage(undefined); setStructuredOutput(null); setAnswer(""); setActivity(t("agent.starting"));
+    try {
+      const id = await core.resumeAgentTurn(turn.id);
+      setRunId(id);
+      const completed = await consumeRun(id);
+      const assembled = completed.text;
+      if (selected) {
+        const assistant: AgentMessage = { id: crypto.randomUUID(), role: "Assistant", content: assembled, created_at: new Date().toISOString(), turn_id: id, source_refs_json: JSON.stringify(completed.sources), artifact_refs_json: JSON.stringify(completed.artifacts) };
+        await persist(notebooks.map((value) => value.id === selected.id ? { ...value, messages: [...value.messages, assistant], last_answer: assembled, updated_at: new Date().toISOString() } : value));
+      }
+      await queryClient.invalidateQueries({ queryKey: ["agent-turns"] });
+      setActivity(t("agent.completed"));
+    } catch (error) { setActivity(errorMessage(error, t)); } finally { setRunning(false); setRunId(undefined); setPending(undefined); }
+  }
   const pendingPythonCode = pythonCodeForConfirmation(pending);
+  const contextSourceLabels = Array.from(new Set([
+    ...effectiveSourcePaths,
+    ...sources.map((source) => source.title ?? source.locator),
+  ])).slice(0, 12);
 
   // Markdown is sanitized before rendering model output. Timeline keys use
   // run id plus monotonic sequence so repeated event batches stay stable.
-  return <div className="page-content agent-page"><div className="agent-layout"><aside className="agent-notebooks panel"><SectionHeader title={t("agent.notebooks")} action={<button className="icon-button" onClick={() => void createNotebook()}>＋</button>} />{notebooks.map((notebook) => <button className={`notebook-item ${selected?.id === notebook.id ? "active" : ""}`} key={notebook.id} onClick={() => { setSelectedId(notebook.id); setSourcePaths(notebook.source_paths); }} disabled={running}><strong>{notebook.title}</strong><span>{t("agent.sources", { count: notebook.source_paths.length })} · {t("agent.messages", { count: notebook.messages.length })}</span></button>)}{!notebooks.length && <p className="muted small-copy">{t("agent.noNotebook")}</p>}</aside><section className="agent-main panel"><div className="agent-toolbar"><div><span className="eyebrow">{selected?.title ?? t("agent.newNotebook")}</span><h2>{t("agent.promptTitle")}</h2></div><select value={mode} onChange={(event) => setMode(event.target.value as AgentMode)} disabled={running}>{(capabilitiesQuery.data ?? []).map((capability) => <option key={capability.mode} value={capability.mode}>{modeLabel(t, capability.mode)}</option>)}</select></div><div className="agent-messages">{selectedMessages.map((message) => <div className={`message ${message.role === "User" ? "user" : "assistant"}`} key={message.id}>{message.role === "Assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown> : <p>{message.content}</p>}</div>)}{answer && <div className="message assistant"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{answer}</ReactMarkdown></div>}{!selectedMessages.length && !answer && <div className="agent-empty"><div className="spark">✦</div><h3>{t("agent.emptyTitle")}</h3><p>{t("agent.emptyCopy")}</p></div>}</div>{pending && (pending.kind === "ConfirmationRequired" || pending.confirmation_id) && <div className={`permission-card ${pendingPythonCode ? "has-python-code" : ""}`}><span className="permission-icon">!</span><div><strong>{t("agent.permission")}</strong><p>{pending.preview ?? pending.tool_name ?? t("agent.toolFallback")}</p>{pendingPythonCode && <PythonCode source={pendingPythonCode} />}</div><div className="permission-actions"><button className="button subtle small" onClick={() => void resolveConfirmation("Deny")}>{t("agent.deny")}</button><button className="button primary small" onClick={() => void resolveConfirmation("Allow")}>{t("agent.allowOnce")}</button></div></div>}{pending?.kind === "InputRequired" && <div className="permission-card"><span className="permission-icon">?</span><div><strong>{t("agent.inputRequired")}</strong><p>{pending.preview ?? t("agent.inputFallback")}</p><input value={pendingInput} onChange={(event) => setPendingInput(event.target.value)} placeholder={t("agent.answerPlaceholder")} /></div><button className="button primary small" onClick={() => void resolveInput()}>{t("agent.send")}</button></div>}<div className="agent-composer"><textarea value={goal} onChange={(event) => setGoal(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runAgent(); }} placeholder={t("agent.askPlaceholder")} disabled={running} /><div className="composer-footer"><div className="source-chips">{files.slice(0, 3).map((file) => <button key={file.relative_path} className={`source-chip ${effectiveSourcePaths.includes(file.relative_path) ? "selected" : ""}`} onClick={() => void toggleSource(file.relative_path)} disabled={running}>＋ {file.relative_path.split("/").at(-1)}</button>)}{files.length > 3 && <span className="muted small-copy">{t("agent.moreLibrary", { count: files.length - 3 })}</span>}</div><div className="composer-actions"><span className="activity">{activity ?? t("agent.shortcut")}</span>{running ? <button className="button danger" onClick={() => void cancel()}>{t("agent.cancel")}</button> : <button className="button primary" onClick={() => void runAgent()}>{t("agent.run")} <span>↗</span></button>}</div></div></div></section><aside className="agent-timeline panel"><SectionHeader title={t("agent.timeline")} description={t("agent.timelineDescription")} />{events.length ? <div className="timeline">{events.slice(-12).map((event) => <AgentTimelineEvent event={event} events={events} language={language} t={t} key={`${event.run_id}-${event.sequence}`} />)}</div> : <p className="muted small-copy">{t("agent.noEvents")}</p>}</aside></div></div>;
+  return (
+    <div className="page-content agent-page">
+      <div className="agent-layout">
+        <aside className="agent-notebooks panel">
+          <SectionHeader title={t("agent.notebooks")} action={<button className="icon-button" onClick={() => void createNotebook()}>＋</button>} />
+          {recoverableTurn && <div className="panel agent-recovery"><p>{t("agent.recoverable")}</p><button className="button primary small" onClick={() => void resumeTurn(recoverableTurn)} disabled={running}>{t("agent.resume")}</button></div>}
+          {notebooks.map((notebook) => <button className={`notebook-item ${selected?.id === notebook.id ? "active" : ""}`} key={notebook.id} onClick={() => { setSelectedId(notebook.id); setSourcePaths(notebook.source_paths); }} disabled={running}><strong>{notebook.title}</strong><span>{t("agent.sources", { count: notebook.source_paths.length })} · {t("agent.messages", { count: notebook.messages.length })}</span></button>)}
+          {!notebooks.length && <p className="muted small-copy">{t("agent.noNotebook")}</p>}
+        </aside>
+
+        <section className="agent-main panel">
+          <div className="agent-toolbar">
+            <div><span className="eyebrow">{selected?.title ?? t("agent.newNotebook")}</span><h2>{t("agent.promptTitle")}</h2></div>
+            <select value={mode} onChange={(event) => setMode(event.target.value as AgentMode)} disabled={running}>{(capabilitiesQuery.data ?? []).map((capability) => <option key={capability.mode} value={capability.mode}>{modeLabel(t, capability.mode)}</option>)}</select>
+          </div>
+          <div className="agent-messages">
+            {selectedMessages.map((message) => <div className={`message ${message.role === "User" ? "user" : "assistant"}`} key={message.id}>{message.role === "Assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{message.content}</ReactMarkdown> : <p>{message.content}</p>}</div>)}
+            {answer && !(structuredOutput && (mode === "QuestionLab" || mode === "Visualize")) && <div className="message assistant"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{answer}</ReactMarkdown></div>}
+            {structuredOutput && mode === "QuestionLab" && <QuestionSetView value={structuredOutput} t={t} />}
+            {structuredOutput && mode === "Visualize" && <VisualizationView value={structuredOutput} t={t} />}
+            {!selectedMessages.length && !answer && !structuredOutput && <div className="agent-empty"><div className="spark">✦</div><h3>{t("agent.emptyTitle")}</h3><p>{t("agent.emptyCopy")}</p></div>}
+          </div>
+          {pending && (pending.kind === "ConfirmationRequired" || pending.confirmation_id) && <div className={`permission-card ${pendingPythonCode ? "has-python-code" : ""}`}><span className="permission-icon">!</span><div><strong>{t("agent.permission")}</strong><p>{pending.preview ?? pending.tool_name ?? t("agent.toolFallback")}</p>{pendingPythonCode && <PythonCode source={pendingPythonCode} />}</div><div className="permission-actions"><button className="button subtle small" onClick={() => void resolveConfirmation("Deny")}>{t("agent.deny")}</button><button className="button primary small" onClick={() => void resolveConfirmation("Allow")}>{t("agent.allowOnce")}</button></div></div>}
+          {pending?.kind === "InputRequired" && <div className="permission-card"><span className="permission-icon">?</span><div><strong>{t("agent.inputRequired")}</strong><p>{pending.preview ?? t("agent.inputFallback")}</p><input value={pendingInput} onChange={(event) => setPendingInput(event.target.value)} placeholder={t("agent.answerPlaceholder")} /></div><button className="button primary small" onClick={() => void resolveInput()}>{t("agent.send")}</button></div>}
+          <div className="agent-composer">
+            <textarea value={goal} onChange={(event) => setGoal(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void runAgent(); }} placeholder={t("agent.askPlaceholder")} disabled={running} />
+            <div className="composer-footer"><div className="source-chips">{files.slice(0, 3).map((file) => <button key={file.relative_path} className={`source-chip ${effectiveSourcePaths.includes(file.relative_path) ? "selected" : ""}`} onClick={() => void toggleSource(file.relative_path)} disabled={running}>＋ {file.relative_path.split("/").at(-1)}</button>)}{files.length > 3 && <span className="muted small-copy">{t("agent.moreLibrary", { count: files.length - 3 })}</span>}</div><div className="composer-actions"><span className="activity">{activity ?? t("agent.shortcut")}</span>{running ? <button className="button danger" onClick={() => void cancel()}>{t("agent.cancel")}</button> : <button className="button primary" onClick={() => void runAgent()}>{t("agent.run")} <span>↗</span></button>}</div></div>
+          </div>
+        </section>
+
+        <aside className="agent-context panel">
+          <SectionHeader title={t("agent.context")} description={t("agent.timelineDescription")} />
+          <div className="agent-context-body">
+            <section className="agent-context-section">
+              <div className="agent-context-heading"><strong>{t("agent.sourcesPanel")}</strong><span>{t("agent.sources", { count: contextSourceLabels.length })}</span></div>
+              {contextSourceLabels.map((label) => <p className="agent-context-item" title={label} key={label}>{label}</p>)}
+            </section>
+            {artifacts.length > 0 && <section className="agent-context-section"><div className="agent-context-heading"><strong>{t("agent.artifacts")}</strong><span>{artifacts.length}</span></div>{artifacts.map((artifact) => <p className="agent-context-item" title={artifact.path} key={artifact.path}>{artifact.path} · {artifact.render_type ?? artifact.extension}</p>)}</section>}
+            {usage && <section className="agent-context-section"><div className="agent-context-heading"><strong>{t("agent.usage")}</strong></div><p className="agent-context-item">{t("agent.tokens", { count: usage.total_tokens })}{usage.estimated ? ` · ${t("agent.estimated")}` : ""}</p></section>}
+            <section className="agent-context-section agent-context-timeline">
+              <div className="agent-context-heading"><strong>{t("agent.timeline")}</strong><span>{events.length}</span></div>
+              {events.length ? <div className="timeline">{events.slice(-20).map((event) => <AgentTimelineEvent event={event} events={events} language={language} t={t} key={`${event.run_id}-${event.sequence}`} />)}</div> : <p className="muted small-copy">{t("agent.noEvents")}</p>}
+            </section>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function QuestionSetView({ value, t }: { value: Record<string, unknown>; t: Translate }) {
+  const questions = Array.isArray(value.questions) ? value.questions.filter((question): question is Record<string, unknown> => Boolean(question && typeof question === "object" && !Array.isArray(question))) : [];
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [checked, setChecked] = useState(false);
+  const score = questions.reduce((total, question, index) => {
+    const answer = question.answer ?? question.correctAnswer;
+    return total + (answers[index] && answer !== undefined && String(answers[index]) === String(answer) ? 1 : 0);
+  }, 0);
+  if (!questions.length) return null;
+  return <section className="agent-structured-result panel"><h3>{t("agent.questionSet")}</h3>{questions.map((question, index) => { const prompt = String(question.prompt ?? question.question ?? ""); const options = Array.isArray(question.options) ? question.options.map(String) : []; return <div className="question-card" key={`${index}-${prompt}`}><strong>{index + 1}. {prompt}</strong><div>{options.map((option) => <button className={`button subtle small ${answers[index] === option ? "active" : ""}`} key={option} onClick={() => { setAnswers((current) => ({ ...current, [index]: option })); setChecked(false); }}>{option}</button>)}</div>{checked && <p className="small-copy">{t("agent.answer")}: {String(question.answer ?? question.correctAnswer ?? "—")}{question.explanation ? ` · ${String(question.explanation)}` : ""}</p>}</div>; })}<button className="button primary small" onClick={() => setChecked(true)}>{t("agent.checkAnswers")}</button>{checked && <p className="small-copy">{t("agent.score")}: {score} / {questions.length}</p>}</section>;
+}
+
+function sanitizeMarkup(markup: string, allowSvg: boolean): string | null {
+  if (typeof DOMParser === "undefined") return null;
+  const document = new DOMParser().parseFromString(markup, "text/html");
+  const root = allowSvg ? document.querySelector("svg") : document.body;
+  if (!root) return null;
+  root.querySelectorAll("script, iframe, object, embed, foreignObject, form").forEach((element) => element.remove());
+  root.querySelectorAll("*").forEach((element) => {
+    [...element.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.toLowerCase().replace(/\s/g, "");
+      if (name.startsWith("on") || value.includes("javascript:") || value.includes("data:text/html")) element.removeAttribute(attribute.name);
+      if ((name === "href" || name === "xlink:href" || name === "src") && value.startsWith("data:")) element.removeAttribute(attribute.name);
+    });
+  });
+  return allowSvg ? root.outerHTML : root.innerHTML;
+}
+
+function VisualizationView({ value, t }: { value: Record<string, unknown>; t: Translate }) {
+  const renderType = String(value.renderType ?? value.render_type ?? "markdown").toLowerCase();
+  const content = String(value.content ?? "");
+  const safeSvg = renderType === "svg" ? sanitizeMarkup(content, true) : null;
+  const safeHtml = renderType === "html" ? sanitizeMarkup(content, false) : null;
+  if (renderType === "svg" && safeSvg) return <section className="agent-structured-result panel"><h3>{t("agent.visualization")}</h3><div className="visualization-svg" dangerouslySetInnerHTML={{ __html: safeSvg }} /></section>;
+  if (renderType === "html" && safeHtml) return <section className="agent-structured-result panel"><h3>{t("agent.visualization")}</h3><iframe title={t("agent.visualization")} sandbox="" srcDoc={safeHtml} /></section>;
+  if (renderType === "markdown") return <section className="agent-structured-result panel"><h3>{t("agent.visualization")}</h3><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{content}</ReactMarkdown></section>;
+  return <section className="agent-structured-result panel"><h3>{t("agent.visualization")}</h3><pre className="agent-visualization-source"><code>{content}</code></pre></section>;
 }
 
 function SettingsPage({ provider, onChanged, theme, onThemeChange, visualTheme, onVisualThemeChange }: { provider?: AppSnapshot["provider"]; onChanged: () => void; theme: "light" | "dark"; onThemeChange: (theme: "light" | "dark") => void; visualTheme: VisualTheme; onVisualThemeChange: (theme: VisualTheme) => void }) {

@@ -30,11 +30,11 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    AgentNotebook, CoachAnalysis, CoachChat, CoachConversationMessage, CoachData, CoachDataRow,
-    CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal, ExamPlan,
-    ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull, Result, Routine,
-    RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession, SubTask, Subject,
-    TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo, decode_coach_payload,
+    AgentNotebook, AgentTurn, CoachAnalysis, CoachChat, CoachConversationMessage, CoachData,
+    CoachDataRow, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal,
+    ExamPlan, ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull, Result,
+    Routine, RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession, SubTask,
+    Subject, TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo, decode_coach_payload,
     learning_report, make_coach_row, platform::is_link_like,
     safe_path::ensure_no_symlink_components,
 };
@@ -93,6 +93,7 @@ impl Workspace {
             "Media/images",
             "Media/audio",
             "Agent/runs",
+            "Agent/turns",
             "Agent/artifacts",
             "Agent/memory",
             "Agent/notebooks",
@@ -362,6 +363,7 @@ impl Workspace {
                 "Agent artifact exceeds the 10 MiB limit".into(),
             ));
         }
+        validate_agent_artifact_content(extension, contents)?;
         // Build the final relative path only after each user-controlled token
         // has passed its narrower character policy.
         let relative = format!("Agent/artifacts/{run_id}/{artifact_id}.{extension}");
@@ -375,6 +377,105 @@ impl Workspace {
         let _guard = self.inner.write_lock.lock();
         atomic_write(&path, contents)?;
         Ok(relative)
+    }
+
+    /// Persist one Agent turn checkpoint below a validated, fixed directory.
+    pub fn write_agent_turn(&self, turn: &AgentTurn) -> Result<()> {
+        turn.validate()?;
+        let path = self
+            .root()
+            .join("Agent/turns")
+            .join(format!("{}.json", turn.id));
+        let bytes = serde_json::to_vec_pretty(turn)?;
+        let _guard = self.inner.write_lock.lock();
+        atomic_write(&path, &bytes)
+    }
+
+    /// Read a single durable Agent turn checkpoint.
+    pub fn read_agent_turn(&self, id: &str) -> Result<AgentTurn> {
+        if id.is_empty()
+            || !id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            })
+        {
+            return Err(WorkspaceError::InvalidPath("invalid Agent turn id".into()));
+        }
+        let path = self.root().join("Agent/turns").join(format!("{id}.json"));
+        let turn: AgentTurn = serde_json::from_slice(&fs::read(path)?)?;
+        turn.validate()?;
+        Ok(turn)
+    }
+
+    /// List durable Agent turns in stable update order.
+    pub fn read_agent_turns(&self) -> Result<Vec<AgentTurn>> {
+        let directory = self.root().join("Agent/turns");
+        let mut turns = Vec::new();
+        if !directory.is_dir() {
+            return Ok(turns);
+        }
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let turn: AgentTurn = serde_json::from_slice(&fs::read(entry.path())?)?;
+            turn.validate()?;
+            turns.push(turn);
+        }
+        turns.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(turns)
+    }
+
+    /// Read persisted run events without making the Workspace depend on the
+    /// Agent event enum. The runtime performs the typed JSON projection.
+    pub fn read_agent_run_log(&self, run_id: &str) -> Result<Vec<String>> {
+        if run_id.is_empty()
+            || !run_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            })
+        {
+            return Err(WorkspaceError::InvalidPath("invalid Agent run id".into()));
+        }
+        let path = self
+            .root()
+            .join("Agent/runs")
+            .join(format!("{run_id}.jsonl"));
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        Ok(fs::read_to_string(path)?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Append one already-serialized Agent event while holding the Workspace
+    /// write lock. Run logs are intentionally append-only because their
+    /// monotonic sequence is the replay cursor; typed event decoding remains
+    /// in the Agent crate.
+    pub fn append_agent_run_log(&self, run_id: &str, line: &str) -> Result<()> {
+        if run_id.is_empty()
+            || !run_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || character == '-' || character == '_'
+            })
+        {
+            return Err(WorkspaceError::InvalidPath("invalid Agent run id".into()));
+        }
+        if line.len() > 512 * 1024 {
+            return Err(WorkspaceError::InvalidPath(
+                "Agent event exceeds 512 KiB".into(),
+            ));
+        }
+        let path = self
+            .root()
+            .join("Agent/runs")
+            .join(format!("{run_id}.jsonl"));
+        let _guard = self.inner.write_lock.lock();
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()?;
+        Ok(())
     }
 
     /// Read workspace- or notebook-scoped Agent memory, returning an empty JSON
@@ -1369,6 +1470,45 @@ impl Workspace {
     }
 }
 
+fn validate_agent_artifact_content(extension: &str, contents: &[u8]) -> Result<()> {
+    if !matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "html" | "htm" | "svg"
+    ) {
+        return Ok(());
+    }
+    let text = std::str::from_utf8(contents).map_err(|_| {
+        WorkspaceError::InvalidPath("HTML and SVG Agent artifacts must be UTF-8".into())
+    })?;
+    let lowered = text.to_ascii_lowercase();
+    let compact = lowered
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let blocked = [
+        "<script",
+        "javascript:",
+        "data:text/html",
+        "<iframe",
+        "<object",
+        "<embed",
+        " onload=",
+        " onclick=",
+        " onerror=",
+        " onmouseover=",
+    ];
+    if blocked.iter().any(|needle| lowered.contains(needle))
+        || ["onload=", "onclick=", "onerror=", "onmouseover="]
+            .iter()
+            .any(|needle| compact.contains(needle))
+    {
+        return Err(WorkspaceError::InvalidPath(
+            "HTML/SVG artifact contains executable or embedded content".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn is_hidden_or_link(entry: &walkdir::DirEntry) -> bool {
     // Hidden trees are excluded before traversal descends into them; link-like
     // entries are also treated as hidden so WalkDir cannot expose redirects.
@@ -1634,6 +1774,57 @@ mod tests {
                 .write_agent_artifact("../run", "artifact", "md", b"bad")
                 .is_err()
         );
+        assert!(
+            workspace
+                .write_agent_artifact(
+                    "run-3",
+                    "unsafe",
+                    "svg",
+                    b"<svg><script>alert(1)</script></svg>"
+                )
+                .is_err()
+        );
+        assert!(
+            workspace
+                .write_agent_artifact(
+                    "run-3",
+                    "safe",
+                    "svg",
+                    b"<svg viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\" /></svg>"
+                )
+                .is_ok()
+        );
+
+        let turn = AgentTurn {
+            id: "turn-1".into(),
+            mode: "deep_research".into(),
+            notebook_id: Some("notebook-1".into()),
+            config_json: None,
+            goal: "Find the evidence".into(),
+            source_paths: vec!["Documents/lesson.md".into()],
+            allow_tools: true,
+            read_only: true,
+            history_json: "[]".into(),
+            status: "recoverable".into(),
+            stage: Some("researching".into()),
+            loop_index: 2,
+            last_sequence: 9,
+            result_json: None,
+            error: None,
+            checkpoint: "safe".into(),
+            resume_safe: true,
+            created_at: "2026-07-31T08:00:00Z".into(),
+            updated_at: "2026-07-31T08:01:00Z".into(),
+        };
+        workspace.write_agent_turn(&turn).unwrap();
+        assert_eq!(workspace.read_agent_turn("turn-1").unwrap(), turn);
+        workspace
+            .append_agent_run_log("turn-1", "{\"sequence\":1}")
+            .unwrap();
+        assert_eq!(
+            workspace.read_agent_run_log("turn-1").unwrap(),
+            vec!["{\"sequence\":1}"]
+        );
     }
 
     #[test]
@@ -1653,12 +1844,18 @@ mod tests {
                     role: AgentMessageRole::User,
                     content: "Make a study plan".into(),
                     created_at: "2026-07-30T08:59:00Z".into(),
+                    turn_id: None,
+                    source_refs_json: None,
+                    artifact_refs_json: None,
                 },
                 AgentMessage {
                     id: Uuid::new_v4(),
                     role: AgentMessageRole::Assistant,
                     content: "Start with chapter one.".into(),
                     created_at: "2026-07-30T09:00:00Z".into(),
+                    turn_id: Some("turn-1".into()),
+                    source_refs_json: Some("[{\"locator\":\"Documents/lesson.md\"}]".into()),
+                    artifact_refs_json: Some("[]".into()),
                 },
             ],
             last_goal: "Make a study plan".into(),

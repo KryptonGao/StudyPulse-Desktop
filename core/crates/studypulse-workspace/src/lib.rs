@@ -40,13 +40,13 @@ pub use features::{
     proposal_task, validate_report_range,
 };
 pub use models::{
-    AgentMessage, AgentMessageRole, AgentNotebook, ComprehensiveExam, ComprehensiveExamFull,
-    DiaryEntry, DifficultyAnnotation, Exam, ExamChecklistItem, ExamFull, ExamReview, ExamTimeSlot,
-    FileEntry, GoalReward, Grade, HandwritingAnswerEntry, HeartRateSample, InvestmentTarget,
-    IosRecord, MasteryHistoryEntry, MistakeNote, MistakeNoteFull, PhaseGoal, ReviewState, Routine,
-    RoutineInstance, RoutineType, SearchMatch, SessionIntensity, StudyPhase, StudySession,
-    StudySessionSource, SubTask, Subject, TaskItem, TaskType, TimeInvestmentSubject,
-    TimeInvestmentTheme, WorkspaceInfo,
+    AgentMessage, AgentMessageRole, AgentNotebook, AgentTurn, ComprehensiveExam,
+    ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, Exam, ExamChecklistItem, ExamFull,
+    ExamReview, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
+    HeartRateSample, InvestmentTarget, IosRecord, MasteryHistoryEntry, MistakeNote,
+    MistakeNoteFull, PhaseGoal, ReviewState, Routine, RoutineInstance, RoutineType, SearchMatch,
+    SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem,
+    TaskType, TimeInvestmentSubject, TimeInvestmentTheme, WorkspaceInfo,
 };
 pub use safe_path::{SafeRelativePath, validate_wire_relative_path};
 pub use workspace::Workspace;
