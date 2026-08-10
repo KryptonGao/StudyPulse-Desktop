@@ -92,6 +92,21 @@ pub struct ModelRequest {
 pub struct ModelResponse {
     pub text_deltas: Vec<String>,
     pub tool_calls: Vec<ModelToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ModelUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub estimated: bool,
 }
 
 // `text_deltas` is a final normalized snapshot, not necessarily a one-to-one
@@ -219,6 +234,7 @@ impl ModelClient for MockModelClient {
                     "你可以在 Tasks 页面查看。".into(),
                 ],
                 tool_calls: Vec::new(),
+                usage: None,
             },
         };
         Ok(response)
@@ -809,6 +825,7 @@ fn parse_agent_reply(reply: &str) -> ModelResponse {
             return ModelResponse {
                 text_deltas: vec![text],
                 tool_calls: Vec::new(),
+                usage: None,
             };
         }
     }
@@ -820,6 +837,7 @@ fn parse_agent_reply(reply: &str) -> ModelResponse {
     ModelResponse {
         text_deltas: vec![reply.to_owned()],
         tool_calls: Vec::new(),
+        usage: None,
     }
 }
 
@@ -980,6 +998,7 @@ fn model_response_from_calls(calls: Vec<AgentCall>) -> Option<ModelResponse> {
     (!tool_calls.is_empty()).then_some(ModelResponse {
         text_deltas: Vec::new(),
         tool_calls,
+        usage: None,
     })
 }
 
@@ -1048,6 +1067,7 @@ impl StreamingAgentReply {
 struct OpenAIStreamingReply {
     content: StreamingAgentReply,
     tool_calls: BTreeMap<usize, OpenAIToolCallAccumulator>,
+    usage: Option<ModelUsage>,
 }
 
 // OpenAI-compatible tool calls arrive as fragments keyed by `index`.  Keeping
@@ -1068,6 +1088,7 @@ impl OpenAIStreamingReply {
     // content stream through the Cloud-compatible envelope parser.  This is the
     // single convergence point for streaming and non-streaming semantics.
     fn finish(self) -> Result<ModelResponse, ModelError> {
+        let usage = self.usage;
         if !self.tool_calls.is_empty() {
             let calls = self
                 .tool_calls
@@ -1086,11 +1107,16 @@ impl OpenAIStreamingReply {
                 .iter()
                 .filter_map(decode_agent_call)
                 .collect::<Vec<_>>();
-            return model_response_from_calls(response).ok_or(ModelError::InvalidResponse);
+            let mut normalized =
+                model_response_from_calls(response).ok_or(ModelError::InvalidResponse)?;
+            normalized.usage = usage;
+            return Ok(normalized);
         }
 
         let content = self.content.finish()?;
-        Ok(parse_agent_reply(&content))
+        let mut normalized = parse_agent_reply(&content);
+        normalized.usage = usage;
+        Ok(normalized)
     }
 }
 
@@ -1178,6 +1204,9 @@ fn consume_openai_sse_event(
             .unwrap_or_else(|| "OpenAI-compatible provider returned an error".into());
         return Err(ModelError::Request(message));
     }
+    if let Some(usage) = parse_model_usage(value.get("usage")) {
+        reply.usage = Some(usage);
+    }
     let Some(choice) = value
         .get("choices")
         .and_then(Value::as_array)
@@ -1220,6 +1249,7 @@ fn parse_openai_completion(bytes: &[u8]) -> Result<ModelResponse, ModelError> {
     // plain message is normalized through parse_agent_reply so final envelopes
     // and provider-specific plain text remain compatible.
     let value: Value = serde_json::from_slice(bytes).map_err(|_| ModelError::InvalidResponse)?;
+    let usage = parse_model_usage(value.get("usage"));
     if value.get("error").is_some() {
         let message = decode_error_message(bytes)
             .unwrap_or_else(|| "OpenAI-compatible provider returned an error".into());
@@ -1236,7 +1266,8 @@ fn parse_openai_completion(bytes: &[u8]) -> Result<ModelResponse, ModelError> {
             .iter()
             .filter_map(decode_agent_call)
             .collect::<Vec<_>>();
-        if let Some(response) = model_response_from_calls(response) {
+        if let Some(mut response) = model_response_from_calls(response) {
+            response.usage = usage;
             return Ok(response);
         }
     }
@@ -1245,7 +1276,28 @@ fn parse_openai_completion(bytes: &[u8]) -> Result<ModelResponse, ModelError> {
         .and_then(Value::as_str)
         .filter(|content| !content.trim().is_empty())
         .ok_or(ModelError::InvalidResponse)?;
-    Ok(parse_agent_reply(content))
+    let mut response = parse_agent_reply(content);
+    response.usage = usage;
+    Ok(response)
+}
+
+fn parse_model_usage(value: Option<&Value>) -> Option<ModelUsage> {
+    let value = value?.as_object()?;
+    let prompt_tokens = value.get("prompt_tokens").and_then(Value::as_u64)?;
+    let completion_tokens = value
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let total_tokens = value
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| prompt_tokens.saturating_add(completion_tokens));
+    Some(ModelUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        estimated: false,
+    })
 }
 
 fn partial_final_text(input: &str) -> Option<String> {
@@ -1468,6 +1520,7 @@ fn tool_call(name: &str, arguments: Value) -> ModelResponse {
             name: name.into(),
             arguments,
         }],
+        usage: None,
     }
 }
 
@@ -1945,6 +1998,7 @@ mod tests {
         // textual StudyPulse envelope.
         let response = parse_openai_completion(
             br#"{
+                "usage": {"prompt_tokens": 4, "completion_tokens": 3, "total_tokens": 7},
                 "choices": [{
                     "message": {
                         "tool_calls": [{
@@ -1963,6 +2017,10 @@ mod tests {
 
         assert_eq!(response.tool_calls[0].id, "call-1");
         assert_eq!(response.tool_calls[0].name, "get_tasks");
+        assert_eq!(
+            response.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(7)
+        );
     }
 
     #[test]
