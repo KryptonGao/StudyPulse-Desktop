@@ -182,4 +182,4 @@ Health/Recovery 模块尚未包含在当前客户端中；跨端同步、完整�
 
 本次 README 的轻量更新由 Codex 完成。
 
-<sub>当前仓库的桌面版本元数据为 <code>0.7.0</code>；发布状态以实际 GitHub Release 为准。</sub>
+<sub>当前仓库的桌面版本元数据为 <code>0.8.0</code>；发布状态以实际 GitHub Release 为准。</sub>

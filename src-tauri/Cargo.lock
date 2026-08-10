@@ -3905,7 +3905,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studypulse-agent"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -3922,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "keyring",
@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-ffi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "hex",
@@ -3961,7 +3961,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-model-client"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -3973,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-tools"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -3989,7 +3989,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-workspace"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
