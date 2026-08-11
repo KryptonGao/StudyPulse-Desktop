@@ -1,6 +1,6 @@
 [package]
 name = "studypulse-client"
-version = "0.7.0"
+version = "0.9.0"
 description = "Local-first StudyPulse desktop client"
 authors = ["StudyPulse"]
 edition = "2024"
