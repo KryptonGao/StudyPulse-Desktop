@@ -10,6 +10,7 @@ import { languageLocale, localizeEnum, useI18n, type Translate } from "../i18n";
 import { detectVisualTheme, saveVisualTheme, type VisualTheme } from "../theme";
 import type { AgentEvent, AgentEventKind, AgentMessage, AgentMode, AgentNotebook, AgentTurn, AppSnapshot, ArtifactRef, ComprehensiveExam, Exam, Grade, SessionIntensity, SourceRef, TimeInvestmentSubject, UsageSummary } from "../types";
 import { DiaryPage, FlashcardsPage, TrendsPage } from "./P1Pages";
+import { MistakesPage as MistakesFeaturePage } from "./MistakesPage";
 import { CoachPage, ExamSimulationPage, ReportsPage, ReversePlannerPage } from "./P2Pages";
 
 // `Page` is the UI-only route model. It stays separate from Core DTOs so that
@@ -264,7 +265,7 @@ export default function App() {
         {page === "simulation" && <ExamSimulationPage provider={snapshot.data?.provider} />}
         {page === "planner" && <ReversePlannerPage provider={snapshot.data?.provider} />}
         {page === "reports" && <ReportsPage />}
-        {page === "mistakes" && <MistakesPage />}
+        {page === "mistakes" && <MistakesFeaturePage provider={snapshot.data?.provider} />}
         {page === "diary" && <DiaryPage />}
         {page === "trends" && <TrendsPage />}
         {page === "flashcards" && <FlashcardsPage />}
@@ -436,7 +437,7 @@ function InvestmentPage() {
   return <div className="page-content"><SectionHeader title={t("investment.title")} description={t("investment.description")} action={<div className="inline-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={t("investment.newSubject")} /><select value={theme} onChange={(event) => setTheme(event.target.value)}><option value="Ocean">{t("theme.ocean")}</option><option value="Coral">{t("theme.coral")}</option><option value="Violet">{t("theme.violet")}</option><option value="Sunshine">{t("theme.sunshine")}</option><option value="Mint">{t("theme.mint")}</option></select><button className="button primary small" onClick={saveSubject} disabled={mutation.isPending}>{mutation.isPending ? t("tasks.saving") : t("investment.add")}</button></div>} />{values.length ? <div className="record-grid">{values.map((value) => <div className="record-card" key={value.id}><div className="record-index">{value.sort_order + 1}</div><h3>{value.name}</h3><div className="record-field"><span>{t("investment.theme")}</span><strong>{themeLabel(t, value.theme)}</strong></div><div className="record-field"><span>{t("investment.started")}</span><strong>{formatDate(value.start_date, language)}</strong></div><button className="button subtle small" onClick={() => remove.mutate(value.id)} disabled={remove.isPending}>{t("investment.remove")}</button></div>)}</div> : <div className="panel"><EmptyState title={t("investment.none")} copy={t("investment.noneCopy")} /></div>}</div>;
 }
 
-function MistakesPage() {
+export function LegacyMistakesPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["mistakes"], queryFn: core.mistakes });

@@ -832,6 +832,25 @@ async fn upsert_mistake(value: MistakeNoteDto, state: State<'_, AppState>) -> Re
 }
 
 #[tauri::command]
+async fn apply_mistake_ai_patch(
+    id: String,
+    patch_json: String,
+    state: State<'_, AppState>,
+) -> Result<MistakeNoteDto, AppError> {
+    core_call(state, move |core| core.apply_mistake_ai_patch(id, patch_json)).await
+}
+
+#[tauri::command]
+async fn save_mistake_ai_session(
+    id: String,
+    kind: String,
+    payload_json: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    core_call(state, move |core| core.save_mistake_ai_session(id, kind, payload_json)).await
+}
+
+#[tauri::command]
 async fn upsert_diary_entry(
     value: DiaryEntryDto,
     state: State<'_, AppState>,
@@ -1124,6 +1143,23 @@ async fn read_media(relative_path: String, state: State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
+async fn write_media(
+    relative_path: String,
+    data_base64: String,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    if data_base64.len() > 90 * 1024 * 1024 {
+        return Err(AppError::InvalidInput {
+            message: "media payload is too large".into(),
+        });
+    }
+    let contents = BASE64.decode(data_base64).map_err(|_| AppError::InvalidInput {
+        message: "media payload is not valid base64".into(),
+    })?;
+    core_call(state, move |core| core.write_media(relative_path, contents)).await
+}
+
+#[tauri::command]
 // Backup export/inspection/application are Core-managed operation state
 // machines. The host only transports options, inspection IDs, and events.
 async fn export_backup(
@@ -1233,6 +1269,8 @@ pub fn run() {
             delete_grade,
             get_mistakes,
             upsert_mistake,
+            apply_mistake_ai_patch,
+            save_mistake_ai_session,
             delete_mistake,
             delete_diary_entry,
             get_due_mistakes,
@@ -1285,6 +1323,7 @@ pub fn run() {
             search_library,
             import_library_file,
             read_media,
+            write_media,
             export_backup,
             inspect_backup,
             apply_backup,

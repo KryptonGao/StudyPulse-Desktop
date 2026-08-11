@@ -12,6 +12,7 @@ name = "uniffi-bindgen-swift"
 path = "src/bin/uniffi-bindgen-swift.rs"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 hex.workspace = true
 parking_lot.workspace = true
