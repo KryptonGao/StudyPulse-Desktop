@@ -13,8 +13,8 @@ use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use studypulse_model_client::{
-    ChatMessage, ModelClient, ModelRequest, ModelTextDeltaHandler, ModelToolCall,
-    ModelToolDefinition, ModelUsage,
+    ChatMessage, ModelClient, ModelImageAttachment, ModelRequest, ModelTextDeltaHandler,
+    ModelToolCall, ModelToolDefinition, ModelUsage,
 };
 use studypulse_tools::{PermissionLevel, ToolRegistry};
 use studypulse_workspace::{AgentTurn, Workspace};
@@ -649,6 +649,7 @@ impl AgentRuntime {
             goal,
             source_paths,
             history,
+            Vec::new(),
             ToolPolicy {
                 allow_tools: true,
                 read_only: false,
@@ -665,6 +666,7 @@ impl AgentRuntime {
         goal: String,
         source_paths: Vec<String>,
         history: Vec<ConversationMessage>,
+        attachments: Vec<ModelImageAttachment>,
     ) -> Result<String, AgentError> {
         let allow_tools = !source_paths.is_empty();
         self.start_agent_with_mode_and_policy(
@@ -672,6 +674,7 @@ impl AgentRuntime {
             goal,
             source_paths,
             history,
+            attachments,
             ToolPolicy {
                 allow_tools,
                 read_only: true,
@@ -693,6 +696,7 @@ impl AgentRuntime {
             request.goal,
             request.source_paths,
             request.history,
+            Vec::new(),
             ToolPolicy {
                 allow_tools: true,
                 read_only: false,
@@ -745,6 +749,7 @@ impl AgentRuntime {
             turn.goal,
             turn.source_paths,
             messages,
+            Vec::new(),
             ToolPolicy {
                 allow_tools: turn.allow_tools,
                 read_only: turn.read_only,
@@ -799,6 +804,7 @@ impl AgentRuntime {
         goal: String,
         source_paths: Vec<String>,
         history: Vec<ConversationMessage>,
+        attachments: Vec<ModelImageAttachment>,
         tool_policy: ToolPolicy,
     ) -> Result<String, AgentError> {
         // Input validation occurs before the run id is reserved.  This is
@@ -903,6 +909,7 @@ impl AgentRuntime {
                         goal,
                         source_paths,
                         initial_messages,
+                        attachments,
                         tool_policy,
                     )),
                     Err(error) => {
@@ -920,6 +927,7 @@ impl AgentRuntime {
         goal: String,
         requested_source_paths: Vec<String>,
         messages: Vec<ChatMessage>,
+        attachments: Vec<ModelImageAttachment>,
         tool_policy: ToolPolicy,
     ) -> Result<String, AgentError> {
         if goal.trim().is_empty() || messages.is_empty() {
@@ -989,6 +997,7 @@ impl AgentRuntime {
                         goal,
                         source_paths,
                         messages,
+                        attachments,
                         tool_policy,
                     )),
                     Err(error) => runtime.finish_with_error(&control, error.to_string()),
@@ -1134,6 +1143,7 @@ impl AgentRuntime {
             .collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_agent(
         self: Arc<Self>,
         control: Arc<RunControl>,
@@ -1141,6 +1151,7 @@ impl AgentRuntime {
         goal: String,
         source_paths: Vec<String>,
         mut messages: Vec<ChatMessage>,
+        attachments: Vec<ModelImageAttachment>,
         tool_policy: ToolPolicy,
     ) {
         // This loop is the only place where a model response becomes a new
@@ -1224,6 +1235,7 @@ impl AgentRuntime {
             let request = ModelRequest {
                 messages: messages.clone(),
                 tools: definitions.clone(),
+                attachments: attachments.clone(),
                 mode: Some(
                     serde_json::to_string(&mode)
                         .unwrap_or_else(|_| "chat".into())
@@ -2824,6 +2836,7 @@ mod tests {
             .start_feature_with_mode(
                 AgentMode::Coach,
                 "Feature input".into(),
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             )

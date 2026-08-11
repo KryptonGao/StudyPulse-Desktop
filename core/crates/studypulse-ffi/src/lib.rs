@@ -19,7 +19,7 @@ use studypulse_agent::{
 };
 use studypulse_model_client::{
     ByokConfig, CloudAuthTokens, CloudModelClient, CloudProfile, DEFAULT_CLOUD_API_BASE_URL,
-    ModelClient, OpenAICompatibleModelClient,
+    ModelClient, ModelImageAttachment, OpenAICompatibleModelClient,
 };
 use studypulse_tools::PermissionLevel;
 use studypulse_workspace::{
@@ -29,11 +29,11 @@ use studypulse_workspace::{
     DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal, ExamPlan, ExamReview,
     ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
     HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull,
-    PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SearchMatch,
-    SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem,
-    TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme, TodaySnapshot,
-    TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired, parse_structured_json,
-    proposal_task,
+    PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SafeRelativePath,
+    SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject,
+    TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme,
+    TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired,
+    parse_structured_json, proposal_task,
 };
 use thiserror::Error;
 
@@ -77,6 +77,35 @@ impl CoreError {
             message: error.to_string(),
         }
     }
+}
+
+const MAX_MISTAKE_AI_SESSION_BYTES: usize = 64 * 1024;
+const MAX_MISTAKE_AI_SESSIONS: usize = 20;
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MistakeAiPatchInput {
+    #[serde(default)]
+    error_reason: Option<String>,
+    #[serde(default)]
+    wrong_solution: Option<String>,
+    #[serde(default)]
+    correct_solution: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    question_images: Option<Vec<String>>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+}
+
+fn bounded_ai_text(value: Option<String>, field: &str) -> Result<Option<String>, CoreError> {
+    let Some(value) = value else { return Ok(None) };
+    let value = value.trim().to_owned();
+    if value.len() > 32 * 1024 {
+        return Err(CoreError::message(format!("{field} is larger than 32 KiB")));
+    }
+    Ok(Some(value))
 }
 
 // WorkspaceDto identifies the opened local store.  It contains location and
@@ -1025,6 +1054,7 @@ impl StudyPulseCore {
         *self.workspace.lock() = None;
         *self.last_run_id.lock() = None;
         self.inspections.lock().clear();
+        self.clear_ai_state();
         Ok(())
     }
 
@@ -1080,6 +1110,7 @@ impl StudyPulseCore {
         *self.cloud_account.lock() = Some(account.clone());
         *self.byok_client.lock() = None;
         *self.byok_config.lock() = None;
+        self.clear_ai_state();
         self.rebuild_runtime(model);
         Ok(account)
     }
@@ -1103,6 +1134,7 @@ impl StudyPulseCore {
         *self.cloud_account.lock() = None;
         *self.byok_client.lock() = Some(client);
         *self.byok_config.lock() = Some(config.clone());
+        self.clear_ai_state();
         self.rebuild_runtime(model);
         Ok(config)
     }
@@ -1130,6 +1162,7 @@ impl StudyPulseCore {
             *self.model.lock() = None;
             *self.runtime.lock() = None;
             *self.last_run_id.lock() = None;
+            self.clear_ai_state();
         }
         if let Some(client) = client {
             run_async(client.logout()).map_err(CoreError::message)?;
@@ -1147,6 +1180,7 @@ impl StudyPulseCore {
             *self.model.lock() = None;
             *self.runtime.lock() = None;
             *self.last_run_id.lock() = None;
+            self.clear_ai_state();
         }
         Ok(())
     }
@@ -1322,12 +1356,25 @@ impl StudyPulseCore {
                 content: message.content,
             })
             .collect();
+        let attachments = prepared
+            .attachments
+            .iter()
+            .map(|attachment| ModelImageAttachment {
+                media_type: attachment.mime_type.clone(),
+                data_url: format!(
+                    "data:{};base64,{}",
+                    attachment.mime_type, attachment.data_base64
+                ),
+                source_path: attachment.source_path.clone(),
+            })
+            .collect();
         let run_id = runtime
             .start_feature_with_mode(
                 prepared.mode.into(),
                 prepared.prompt.clone(),
                 prepared.source_paths.clone(),
                 history,
+                attachments,
             )
             .map_err(|error| CoreError::message(format!("AI feature could not start: {error}")))?;
         *self.last_run_id.lock() = Some(run_id.clone());
@@ -1615,6 +1662,144 @@ impl StudyPulseCore {
     pub fn upsert_mistake(&self, value: MistakeNoteDto) -> Result<(), CoreError> {
         self.workspace()?
             .upsert_mistake(value.try_into()?)
+            .map_err(CoreError::message)
+    }
+
+    pub fn apply_mistake_ai_patch(
+        &self,
+        id: String,
+        patch_json: String,
+    ) -> Result<MistakeNoteDto, CoreError> {
+        // AI output is applied to the current record, not to the stale editor
+        // snapshot. This preserves the latest SRS state and review history.
+        if patch_json.len() > MAX_MISTAKE_AI_SESSION_BYTES {
+            return Err(CoreError::message("mistake AI patch is too large"));
+        }
+        let patch: MistakeAiPatchInput = serde_json::from_str(&patch_json)
+            .map_err(|error| CoreError::message(format!("mistake AI patch is invalid: {error}")))?;
+        let error_reason = bounded_ai_text(patch.error_reason, "error reason")?;
+        let wrong_solution = bounded_ai_text(patch.wrong_solution, "wrong solution")?;
+        let correct_solution = bounded_ai_text(patch.correct_solution, "correct solution")?;
+        let tags = patch.tags.map(|values| {
+            values
+                .into_iter()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .take(8)
+                .collect::<Vec<_>>()
+        });
+        let question_images = patch.question_images.map(|values| {
+            values
+                .into_iter()
+                .filter(|value| {
+                    value.starts_with("images/")
+                        && SafeRelativePath::parse(&format!("Media/{value}")).is_ok()
+                })
+                .take(8)
+                .collect::<Vec<_>>()
+        });
+        if let Some(result) = &patch.result {
+            let result_json = serde_json::to_vec(result).map_err(CoreError::message)?;
+            if result_json.len() > MAX_MISTAKE_AI_SESSION_BYTES {
+                return Err(CoreError::message("mistake AI result is too large"));
+            }
+        }
+        let mistake_id = parse_uuid(&id)?;
+        let workspace = self.workspace()?;
+        let mut mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
+        let mistake = mistakes
+            .iter_mut()
+            .find(|value| value.id == mistake_id)
+            .ok_or_else(|| CoreError::message(format!("mistake UUID not found: {id}")))?;
+        if let Some(value) = error_reason {
+            mistake.error_reason = value;
+        }
+        if let Some(value) = wrong_solution {
+            mistake.wrong_solution = value;
+        }
+        if let Some(value) = correct_solution {
+            mistake.correct_solution = value;
+        }
+        if let Some(values) = tags {
+            mistake.tags = values;
+        }
+        if let Some(values) = question_images {
+            mistake.question_images = values;
+        }
+        if let Some(result) = patch.result {
+            mistake.extra.insert("studypulseAiAnalysis".into(), result);
+        }
+        let updated = mistake.clone();
+        workspace
+            .upsert_mistake(updated.clone())
+            .map_err(CoreError::message)?;
+        Ok(updated.into())
+    }
+
+    pub fn save_mistake_ai_session(
+        &self,
+        id: String,
+        kind: String,
+        payload_json: String,
+    ) -> Result<(), CoreError> {
+        // Generated questions, grading, maps, and debates are persisted as
+        // bounded opaque extensions so old clients can still round-trip the
+        // parent mistake without a schema migration.
+        let kind = kind.trim().to_owned();
+        if kind.is_empty()
+            || kind.len() > 64
+            || !matches!(
+                kind.as_str(),
+                "analysis"
+                    | "similar_questions"
+                    | "self_test_generate"
+                    | "self_test_grade"
+                    | "mind_map"
+                    | "debate"
+                    | "fault_line"
+                    | "image_recognition"
+                    | "ocr"
+            )
+        {
+            return Err(CoreError::message("mistake AI session kind is invalid"));
+        }
+        if payload_json.len() > MAX_MISTAKE_AI_SESSION_BYTES {
+            return Err(CoreError::message("mistake AI session is too large"));
+        }
+        let payload: serde_json::Value = serde_json::from_str(&payload_json).map_err(|error| {
+            CoreError::message(format!("mistake AI session is invalid: {error}"))
+        })?;
+        if !payload.is_object() && !payload.is_array() {
+            return Err(CoreError::message(
+                "mistake AI session payload must be an object or array",
+            ));
+        }
+        let mistake_id = parse_uuid(&id)?;
+        let workspace = self.workspace()?;
+        let mut mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
+        let mistake = mistakes
+            .iter_mut()
+            .find(|value| value.id == mistake_id)
+            .ok_or_else(|| CoreError::message(format!("mistake UUID not found: {id}")))?;
+        let sessions = mistake
+            .extra
+            .entry("studypulseAiSessions".into())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        let sessions = sessions
+            .as_array_mut()
+            .ok_or_else(|| CoreError::message("stored mistake AI sessions are malformed"))?;
+        sessions.push(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "kind": kind,
+            "payload": payload,
+            "createdAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }));
+        if sessions.len() > MAX_MISTAKE_AI_SESSIONS {
+            let remove = sessions.len() - MAX_MISTAKE_AI_SESSIONS;
+            sessions.drain(..remove);
+        }
+        workspace
+            .upsert_mistake(mistake.clone())
             .map_err(CoreError::message)
     }
 
@@ -2517,6 +2702,7 @@ impl StudyPulseCore {
         });
         *self.last_run_id.lock() = None;
         self.inspections.lock().clear();
+        self.clear_ai_state();
     }
 
     fn rebuild_runtime(&self, model: Arc<dyn ModelClient>) {
@@ -2525,6 +2711,11 @@ impl StudyPulseCore {
         let workspace = self.workspace.lock().clone();
         *self.runtime.lock() = workspace.map(|workspace| AgentRuntime::new(workspace, model));
         *self.last_run_id.lock() = None;
+        self.clear_ai_state();
+    }
+
+    fn clear_ai_state(&self) {
+        *self.ai_state.lock() = ai::AiFeatureState::default();
     }
 
     fn workspace(&self) -> Result<Workspace, CoreError> {
@@ -4518,5 +4709,60 @@ mod tests {
         assert_eq!(trends.srs.total_enrolled, 1);
         assert_eq!(trends.srs.due_count, 0);
         assert_eq!(trends.daily_points.len(), 7);
+    }
+
+    #[test]
+    fn mistake_ai_patch_preserves_srs_history_and_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = StudyPulseCore::new();
+        core.create_workspace(temp.path().join("Workspace").to_string_lossy().into_owned())
+            .unwrap();
+        let mistake_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        core.upsert_mistake(MistakeNoteDto {
+            id: mistake_id.clone(),
+            title: "Algebra".into(),
+            subject: "Math".into(),
+            original_question: "x / 2 = 3".into(),
+            source: "Manual".into(),
+            date: now,
+            error_reason: "".into(),
+            wrong_solution: "".into(),
+            correct_solution: "".into(),
+            question_images: Vec::new(),
+            reason_images: Vec::new(),
+            wrong_solution_images: Vec::new(),
+            correct_solution_images: Vec::new(),
+            review_state: None,
+            phase_id: None,
+            exposure_count: 0,
+            mastery_score: 0.0,
+            mastery_history: Vec::new(),
+            handwriting_history: Vec::new(),
+            difficulty: 3,
+            tags: Vec::new(),
+            audio_file_name: None,
+            extra_json: "{}".into(),
+        })
+        .unwrap();
+        core.enroll_mistake(mistake_id.clone()).unwrap();
+        core.review_mistake(mistake_id.clone(), 4).unwrap();
+        let patched = core.apply_mistake_ai_patch(
+            mistake_id.clone(),
+            r#"{"error_reason":"Divided instead of multiplying","wrong_solution":"x=1.5","correct_solution":"Multiply both sides by 2","tags":["inverse operation"],"result":{"confidence":0.9}}"#.into(),
+        ).unwrap();
+        assert_eq!(patched.review_state.as_ref().unwrap().repetitions, 1);
+        assert_eq!(patched.mastery_history.len(), 1);
+        assert_eq!(patched.correct_solution, "Multiply both sides by 2");
+        core.save_mistake_ai_session(
+            mistake_id.clone(),
+            "similar_questions".into(),
+            r#"{"questions":[]}"#.into(),
+        )
+        .unwrap();
+        let stored = core.get_mistakes().unwrap().remove(0);
+        let extra: serde_json::Value = serde_json::from_str(&stored.extra_json).unwrap();
+        assert_eq!(extra["studypulseAiSessions"].as_array().unwrap().len(), 1);
+        assert_eq!(extra["studypulseAiAnalysis"]["confidence"], 0.9);
     }
 }

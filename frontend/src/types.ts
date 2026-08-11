@@ -80,12 +80,13 @@ export interface AppSnapshot {
   provider: ProviderStatus;
 }
 
-export type AiFeatureCaller = "Coach" | "ReversePlanner" | "ExamSimulation" | "Chat";
+export type AiFeatureCaller = "Coach" | "ReversePlanner" | "ExamSimulation" | "MistakeAnalysis" | "Chat";
 
 export interface AiAttachment {
   kind: "image";
   sourcePath?: string;
   dataBase64: string;
+  mimeType?: string;
 }
 
 export interface AiFeatureDiagnostics {
@@ -104,6 +105,70 @@ export interface AiFeatureResult<T> {
   caller: AiFeatureCaller;
   output: T;
   diagnostics: AiFeatureDiagnostics;
+}
+
+export interface MistakeAnalysisOutput {
+  question?: string;
+  errorReason: string;
+  wrongSolution: string;
+  correctSolution: string;
+  tags: string[];
+  confidence: number;
+  evidence: string[];
+}
+
+export type MistakeQuestionKind = "multipleChoice" | "fillBlank";
+
+export interface MistakePracticeQuestion {
+  id: string;
+  kind: MistakeQuestionKind;
+  prompt: string;
+  options: string[];
+  answer: string;
+  explanation: string;
+  concept: string;
+  difficulty: number;
+}
+
+export interface MistakeQuestionSetOutput {
+  questions: MistakePracticeQuestion[];
+}
+
+export interface MistakeQuizGradeOutput {
+  score: number;
+  correctCount: number;
+  totalCount: number;
+  summary: string;
+  results: Array<{ questionId: string; isCorrect: boolean; correctAnswer: string; feedback: string }>;
+}
+
+export interface MistakeMindMapOutput {
+  title: string;
+  nodes: Array<{ id: string; label: string; kind: string; description: string; parentId: string | null }>;
+}
+
+export interface MistakeDebateOutput {
+  reply: string;
+  challenge: string;
+  nextQuestion: string;
+}
+
+export interface MistakeFaultLineOutput {
+  summary: string;
+  concepts: Array<{ id: string; name: string; category: string; mastery: number; evidence: string[]; priority: number }>;
+  repairTasks: Array<{ id: string; title: string; concept: string; reason: string; durationMinutes: number; importance: number }>;
+}
+
+export interface MistakeOcrOutput {
+  text: string;
+  confidence: number;
+}
+
+export interface MistakeAiSession {
+  id: string;
+  kind: string;
+  payload: unknown;
+  createdAt: string;
 }
 
 // Local records preserve the Rust DTO field names here. `extra_json` carries

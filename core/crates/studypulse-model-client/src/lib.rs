@@ -66,6 +66,17 @@ pub enum ChatMessage {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+/// An image supplied to a multimodal feature caller. The data URL stays inside
+/// the provider request and is never included in Agent diagnostics.
+pub struct ModelImageAttachment {
+    pub media_type: String,
+    pub data_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+}
+
 // Tool messages are emitted by the host after execution, never accepted as
 // arbitrary caller input.  That distinction lets a provider continue a loop
 // from an authoritative result instead of manufacturing its own tool output.
@@ -78,6 +89,8 @@ pub enum ChatMessage {
 pub struct ModelRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ModelToolDefinition>,
+    #[serde(default)]
+    pub attachments: Vec<ModelImageAttachment>,
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
@@ -463,6 +476,7 @@ impl CloudModelClient {
     async fn send_chat_stream(
         &self,
         message: String,
+        attachments: &[ModelImageAttachment],
         on_text_delta: &ModelTextDeltaHandler,
     ) -> Result<String, ModelError> {
         // Cloud's stream is parsed as a text transport and normalized into the
@@ -479,6 +493,19 @@ impl CloudModelClient {
             .join("v1/chat")
             .map_err(|error| ModelError::InvalidUrl(error.to_string()))?;
         let mut body = json!({ "message": message, "stream": true });
+        if !attachments.is_empty() {
+            body["attachments"] = Value::Array(
+                attachments
+                    .iter()
+                    .map(|attachment| {
+                        json!({
+                            "mediaType": attachment.media_type,
+                            "dataUrl": attachment.data_url,
+                        })
+                    })
+                    .collect(),
+            );
+        }
         if let Some(model) = &self.model {
             body["model"] = Value::String(model.clone());
         }
@@ -580,9 +607,21 @@ impl OpenAICompatibleModelClient {
             .api_base_url
             .join("chat/completions")
             .map_err(|error| ModelError::InvalidUrl(error.to_string()))?;
+        let content = if request.attachments.is_empty() {
+            Value::String(prompt)
+        } else {
+            let mut parts = vec![json!({"type": "text", "text": prompt})];
+            parts.extend(request.attachments.iter().map(|attachment| {
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": attachment.data_url},
+                })
+            }));
+            Value::Array(parts)
+        };
         let mut body = json!({
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             "stream": true,
         });
         if !request.tools.is_empty() {
@@ -672,7 +711,9 @@ impl ModelClient for CloudModelClient {
         on_text_delta: ModelTextDeltaHandler,
     ) -> Result<ModelResponse, ModelError> {
         let prompt = build_agent_prompt(&request)?;
-        let reply = self.send_chat_stream(prompt, &on_text_delta).await?;
+        let reply = self
+            .send_chat_stream(prompt, &request.attachments, &on_text_delta)
+            .await?;
         Ok(parse_agent_reply(&reply))
     }
 }
@@ -752,6 +793,7 @@ fn build_agent_prompt(request: &ModelRequest) -> Result<String, ModelError> {
 
 Active Agent mode: {mode}
 Stages for this mode: {stages}
+Image attachments: {attachment_count}
 
 Return exactly one JSON object without a surrounding Markdown code fence.
 Use ASCII JSON syntax only: keys and string values must use the plain double
@@ -783,7 +825,8 @@ Authoritative conversation and tool-result transcript:
             "responding".to_owned()
         } else {
             request.stages.join(" -> ")
-        }
+        },
+        attachment_count = request.attachments.len(),
     );
     if prompt.chars().count() > MAX_CLOUD_MESSAGE_CHARACTERS {
         // Reject before network I/O so an oversized transcript cannot consume
@@ -1850,6 +1893,7 @@ mod tests {
                         permission: Some("read".into()),
                     }],
                     mode: None,
+                    attachments: Vec::new(),
                     stages: Vec::new(),
                 },
                 Arc::new(|_| {}),
@@ -1886,6 +1930,7 @@ mod tests {
                     }],
                     tools: Vec::new(),
                     mode: None,
+                    attachments: Vec::new(),
                     stages: Vec::new(),
                 },
                 Arc::new(move |delta| {
@@ -1935,6 +1980,7 @@ mod tests {
                         permission: Some("read".into()),
                     }],
                     mode: None,
+                    attachments: Vec::new(),
                     stages: Vec::new(),
                 },
                 Arc::new(|_| {}),
@@ -1953,6 +1999,45 @@ mod tests {
         assert!(request.contains(r#""model":"gpt-test"#));
         assert!(request.contains(r#""stream":true"#));
         assert!(request.contains(r#""type":"function"#));
+    }
+
+    #[tokio::test]
+    async fn byok_completion_sends_multimodal_image_content_without_path_metadata() {
+        let reply = json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": r#"{"type":"final","text":"recognized"}"#}
+            }]
+        });
+        let (base_url, request) = one_shot_server(StatusCode::OK, reply);
+        let client = OpenAICompatibleModelClient::new(
+            &format!("{base_url}/v1"),
+            "sk-test-key".into(),
+            "vision-test".into(),
+        )
+        .unwrap();
+        let _ = client
+            .complete(
+                ModelRequest {
+                    messages: vec![ChatMessage::User {
+                        content: "Read this mistake".into(),
+                    }],
+                    tools: Vec::new(),
+                    attachments: vec![ModelImageAttachment {
+                        media_type: "image/png".into(),
+                        data_url: "data:image/png;base64,aGVsbG8=".into(),
+                        source_path: Some("images/private.png".into()),
+                    }],
+                    mode: None,
+                    stages: Vec::new(),
+                },
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        let request = request.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(request.contains(r#""type":"image_url"#));
+        assert!(request.contains("data:image/png;base64,aGVsbG8="));
+        assert!(!request.contains("private.png"));
     }
 
     #[tokio::test]
@@ -1976,6 +2061,7 @@ mod tests {
                     }],
                     tools: Vec::new(),
                     mode: None,
+                    attachments: Vec::new(),
                     stages: Vec::new(),
                 },
                 Arc::new(move |delta| {

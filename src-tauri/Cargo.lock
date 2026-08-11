@@ -3943,6 +3943,7 @@ dependencies = [
 name = "studypulse-ffi"
 version = "0.7.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "hex",
  "parking_lot",
