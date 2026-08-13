@@ -80,7 +80,26 @@ export interface AppSnapshot {
   provider: ProviderStatus;
 }
 
-export type AiFeatureCaller = "Coach" | "ReversePlanner" | "ExamSimulation" | "MistakeAnalysis" | "Chat";
+export type AiFeatureCaller = "Coach" | "ReversePlanner" | "ExamSimulation" | "MistakeAnalysis" | "Chat" | "HomeAsk" | "StudySuggestions" | "DailyPlan" | "ScorePrediction" | "PredictionDiscussion" | "ExamAutopsy";
+
+export type Phase3RecordKind = "homeAsk" | "suggestions" | "dailyPlans" | "predictions" | "autopsies";
+
+export interface Phase3AppliedAction {
+  targetId: string;
+  appliedAt: string;
+  kind: string;
+}
+
+// Phase 3 drafts deliberately remain flexible JSON. Core validates their
+// record envelope and only materializes tasks/mistakes after explicit action.
+export interface Phase3Record {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  status: "draft" | "saved" | string;
+  payload: Record<string, unknown>;
+  appliedActions: Record<string, Phase3AppliedAction>;
+}
 
 export interface AiAttachment {
   kind: "image";

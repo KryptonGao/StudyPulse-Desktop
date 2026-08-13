@@ -33,6 +33,8 @@ import type {
   LearningReport,
   MistakeNote,
   ProviderStatus,
+  Phase3Record,
+  Phase3RecordKind,
   SearchMatch,
   SessionIntensity,
   SrsReviewResult,
@@ -149,6 +151,16 @@ export const core = {
       },
     })) as AiFeatureResult<T>,
   aiDiagnostics: async (): Promise<AiFeatureDiagnostics[]> => JSON.parse(await command<string>("get_ai_diagnostics")) as AiFeatureDiagnostics[],
+  phase3Records: async (kind: Phase3RecordKind): Promise<Phase3Record[]> =>
+    (await command<string[]>("get_phase3_records", { kind })).map((value) => JSON.parse(value) as Phase3Record),
+  upsertPhase3Record: (kind: Phase3RecordKind, value: Phase3Record) =>
+    command<void>("upsert_phase3_record", { kind, valueJson: JSON.stringify(value) }),
+  deletePhase3Record: (kind: Phase3RecordKind, id: string) =>
+    command<void>("delete_phase3_record", { kind, id }),
+  applyPhase3TaskActions: async (kind: "suggestions" | "dailyPlans" | "predictions", recordId: string, actionIds: string[]) =>
+    JSON.parse(await command<string>("apply_phase3_task_actions", { kind, recordId, actionIds })) as Array<{ actionId: string; targetId: string; alreadyApplied: boolean }>,
+  applyExamAutopsyActions: async (recordId: string, mistakeItemIds: string[], taskItemIds: string[]) =>
+    JSON.parse(await command<string>("apply_exam_autopsy_actions", { recordId, mistakeItemIds, taskItemIds })) as Array<{ actionId: string; targetId: string; alreadyApplied: boolean }>,
   // `afterSequence` is the last observed monotonic event sequence. Core returns
   // only newer events, so callers must advance it with event.sequence.
   waitAgentEvents: (runId: string, afterSequence: number, timeoutMs = 1000) =>

@@ -118,7 +118,10 @@ export function CoachPage({ provider }: { provider: Provider }) {
   async function sendChat() {
     if (!goal || !chatInput.trim()) return;
     const input = chatInput.trim(); setChatInput(""); setBusy(true);
-    try { const answer = await runFeature<string>("Chat", { goal, message: input }, provider); const user = saveMessage(goal.id, chat, "user", input); const assistant = saveMessage(goal.id, user.chat, "assistant", answer); await core.upsertCoachChat(user.chat); await core.upsertCoachMessage(user.message); await core.upsertCoachMessage(assistant.message); await queryClient.invalidateQueries({ queryKey: ["coach-data"] }); } catch (error) { window.alert(errorText(error)); } finally { setBusy(false); }
+    // Persist the user turn before Core composes the model context. A failed
+    // reply is therefore recoverable and the next request sees the exact
+    // locally saved conversation rather than an optimistic React-only turn.
+    try { const user = saveMessage(goal.id, chat, "user", input); await core.upsertCoachChat(user.chat); await core.upsertCoachMessage(user.message); const answer = await runFeature<string>("Chat", { goal, message: input }, provider); const assistant = saveMessage(goal.id, user.chat, "assistant", answer); await core.upsertCoachMessage(assistant.message); await queryClient.invalidateQueries({ queryKey: ["coach-data"] }); } catch (error) { await queryClient.invalidateQueries({ queryKey: ["coach-data"] }); window.alert(errorText(error)); } finally { setBusy(false); }
   }
 
   if (query.isLoading) return <div className="page-content"><div className="skeleton-card" /><div className="skeleton-card short" /></div>;

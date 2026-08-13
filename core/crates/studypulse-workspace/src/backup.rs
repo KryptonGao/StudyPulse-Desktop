@@ -644,6 +644,11 @@ fn initialize_export_data(root: &Path, destination: &Path) -> Result<()> {
         "exam_goals.jsonl",
         "exam_plans.jsonl",
         "exam_simulations.jsonl",
+        "home_ask_sessions.jsonl",
+        "study_suggestions.jsonl",
+        "daily_ai_plans.jsonl",
+        "score_predictions.jsonl",
+        "exam_autopsies.jsonl",
     ];
     // Copy every existing data file first. This is intentional: files owned by
     // newer iOS/P1/P2 features must survive a Desktop import/export even when
@@ -776,6 +781,11 @@ fn manifest_key_for_file(name: &str) -> Option<&'static str> {
         "exam_goals.jsonl" => Some("examGoals"),
         "exam_plans.jsonl" => Some("examPlans"),
         "exam_simulations.jsonl" => Some("examSimulations"),
+        "home_ask_sessions.jsonl" => Some("homeAskSessions"),
+        "study_suggestions.jsonl" => Some("studySuggestions"),
+        "daily_ai_plans.jsonl" => Some("dailyAiPlans"),
+        "score_predictions.jsonl" => Some("scorePredictions"),
+        "exam_autopsies.jsonl" => Some("examAutopsies"),
         "profile.json" => Some("profile"),
         "plant_state.json" => Some("plantState"),
         "achievements.json" => Some("achievements"),
@@ -986,6 +996,26 @@ fn validate_decoded_content(staging: &Path, manifest: &BackupManifest) -> Result
     }
     if staging.join("data/coach_data.jsonl").is_file() {
         validate_coach_jsonl(&staging.join("data/coach_data.jsonl"))?;
+    }
+    for file in [
+        "home_ask_sessions.jsonl",
+        "study_suggestions.jsonl",
+        "daily_ai_plans.jsonl",
+        "score_predictions.jsonl",
+        "exam_autopsies.jsonl",
+    ] {
+        let path = staging.join("data").join(file);
+        if path.is_file() {
+            validate_typed_jsonl::<crate::AiFeatureRecord>(&path, |record| {
+                if record.id != record.value.id {
+                    return Err("envelope id mismatch".into());
+                }
+                record
+                    .value
+                    .validate(file)
+                    .map_err(|error| error.to_string())
+            })?;
+        }
     }
 
     // Unknown files are accepted, but their JSON must remain parseable so a

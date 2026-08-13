@@ -47,6 +47,12 @@ pub enum AiFeatureCallerDto {
     ReversePlanner,
     ExamSimulation,
     MistakeAnalysis,
+    HomeAsk,
+    StudySuggestions,
+    DailyPlan,
+    ScorePrediction,
+    PredictionDiscussion,
+    ExamAutopsy,
     Chat,
 }
 
@@ -57,6 +63,12 @@ impl AiFeatureCallerDto {
             Self::ReversePlanner => "reverse_planner",
             Self::ExamSimulation => "exam_simulation",
             Self::MistakeAnalysis => "mistake_analysis",
+            Self::HomeAsk => "home_ask",
+            Self::StudySuggestions => "study_suggestions",
+            Self::DailyPlan => "daily_plan",
+            Self::ScorePrediction => "score_prediction",
+            Self::PredictionDiscussion => "prediction_discussion",
+            Self::ExamAutopsy => "exam_autopsy",
             Self::Chat => "chat",
         }
     }
@@ -67,6 +79,11 @@ impl AiFeatureCallerDto {
             Self::ReversePlanner => AgentModeDto::ReversePlanner,
             Self::ExamSimulation => AgentModeDto::ExamSimulation,
             Self::MistakeAnalysis => AgentModeDto::Mastery,
+            Self::HomeAsk | Self::PredictionDiscussion => AgentModeDto::Chat,
+            Self::StudySuggestions
+            | Self::DailyPlan
+            | Self::ScorePrediction
+            | Self::ExamAutopsy => AgentModeDto::DeepSolve,
             Self::Chat => AgentModeDto::Chat,
         }
     }
@@ -294,6 +311,20 @@ pub fn parse_output(prepared: &PreparedAiFeature, raw: &str) -> Result<String, A
         AiFeatureCallerDto::MistakeAnalysis => {
             normalize_mistake_output(prepared, parse_json_object(raw)?)?
         }
+        AiFeatureCallerDto::HomeAsk | AiFeatureCallerDto::PredictionDiscussion => {
+            serde_json::to_value(raw.trim())
+                .map_err(|error| AiFailure::output(error.to_string()))?
+        }
+        AiFeatureCallerDto::StudySuggestions => {
+            normalize_study_suggestions(&prepared.input, parse_json_object(raw)?)?
+        }
+        AiFeatureCallerDto::DailyPlan => {
+            normalize_daily_plan(&prepared.input, parse_json_object(raw)?)?
+        }
+        AiFeatureCallerDto::ScorePrediction => {
+            normalize_score_prediction(&prepared.input, parse_json_object(raw)?)?
+        }
+        AiFeatureCallerDto::ExamAutopsy => normalize_exam_autopsy(parse_json_object(raw)?)?,
     };
     serde_json::to_string(&output).map_err(|error| AiFailure::output(error.to_string()))
 }
@@ -346,6 +377,24 @@ Schema: {"conclusion":"string","rationale":"string","shouldContinue":true,"decis
             r#"You are the StudyPulse exam simulator. The input kind is either generate or grade. For generate, return exactly 10 valid questions in {"questions":[{"id":"uuid","kind":"multipleChoice|freeResponse","prompt":"string","options":["string"],"correctAnswer":"string|null","explanation":"string","points":10}]}. Multiple-choice questions need at least two options. For grade, return {"totalScore":0,"analysis":{"role":"string","confidence":0.0,"evidence":["string","string"],"risk":"string","strategies":["string","string"],"isStable":false,"generatedAt":"RFC3339"},"questionResults":[{"questionId":"uuid","isCorrect":false,"score":0,"feedback":"string"}]}. Return JSON only and never write Workspace data."#
         }
         AiFeatureCallerDto::MistakeAnalysis => mistake_prompt(input)?,
+        AiFeatureCallerDto::HomeAsk => {
+            r#"You are StudyPulse Home Ask. Answer only from the authoritative local context. The desktop application has no health or readiness data; if the question asks about health, readiness, sleep, or HRV, say that Phase 4 needs a real data source. Use Markdown, cite evidence keys in square brackets when applicable, and never claim an action was completed."#
+        }
+        AiFeatureCallerDto::StudySuggestions => {
+            r#"Create at most three concrete study suggestions from authoritative local context. Return JSON only: {"items":[{"id":"uuid","title":"string","reason":"string","priority":1,"evidenceKeys":["string"],"task":{"title":"string","subject":"string","importance":3,"notes":"string"}|null}]}. Every evidenceKeys value must come from the supplied evidence list. Suggestions and tasks are previews only."#
+        }
+        AiFeatureCallerDto::DailyPlan => {
+            r#"Create one to three ranked daily study-plan items from authoritative local context. Return JSON only: {"items":[{"id":"uuid","title":"string","reason":"string","minutes":30,"priority":1,"evidenceKeys":["string"],"task":{"title":"string","subject":"string","importance":3,"notes":"string"}|null}]}. Every evidence key must be supplied. Items are drafts and must never be applied directly."#
+        }
+        AiFeatureCallerDto::ScorePrediction => {
+            r#"Analyze the supplied score-history context. Return JSON only: {"pointEstimate":0,"lowerBound":0,"upperBound":0,"confidence":0.0,"weaknesses":["string"],"risks":["string"],"recommendations":[{"id":"uuid","title":"string","reason":"string","priority":1,"evidenceKeys":["string"],"task":{"title":"string","subject":"string","importance":3,"notes":"string"}|null}],"evidenceKeys":["string"]}. Use only supplied evidence keys. The prediction is an AI estimate, not a guarantee."#
+        }
+        AiFeatureCallerDto::PredictionDiscussion => {
+            r#"Continue a StudyPulse score-prediction discussion using only the supplied saved prediction and local evidence. Respond in Markdown. Do not invent scores or claim tasks were created."#
+        }
+        AiFeatureCallerDto::ExamAutopsy => {
+            r#"Analyze the supplied exam images and local history. Return JSON only: {"items":[{"id":"uuid","questionNumber":"string","question":"string","userAnswer":"string","correctAnswer":"string","points":null,"knowledgePoints":["string"],"behavior":"string","reason":"knowledgeGap|unstableMastery|methodError|calculationError|readingError|timeInsufficient|unanswered|expressionIssue|unknown","evidence":"string","confidence":0.0,"repairSuggestion":"string"}],"conclusion":"string","keyProblems":["string"],"historicalFacts":["string"]}. Items are unconfirmed drafts; never create a task or mistake."#
+        }
         AiFeatureCallerDto::Chat => {
             r#"Respond as a supportive StudyPulse learning coach. Use only the supplied goal and student message. Return plain text, not JSON, and do not create or write tasks."#
         }
@@ -578,6 +627,149 @@ fn normalize_daily_tasks(value: Option<Value>) -> Result<Value, AiFailure> {
         })
         .collect::<Result<Vec<_>, AiFailure>>()?;
     Ok(Value::Array(rows))
+}
+
+fn allowed_evidence(input: &Value) -> HashSet<String> {
+    input
+        .get("allowedEvidenceKeys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn checked_evidence(
+    value: Option<&Value>,
+    allowed: &HashSet<String>,
+) -> Result<Vec<String>, AiFailure> {
+    let values = value
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(key) = values.iter().find(|key| !allowed.contains(*key)) {
+        return Err(AiFailure::output(format!(
+            "model cited unknown evidence key: {key}"
+        )));
+    }
+    Ok(values.into_iter().take(8).collect())
+}
+
+fn normalize_action_items(
+    value: Option<Value>,
+    input: &Value,
+    max_items: usize,
+    minutes: bool,
+) -> Result<Vec<Value>, AiFailure> {
+    let allowed = allowed_evidence(input);
+    let Some(Value::Array(rows)) = value else {
+        return Ok(Vec::new());
+    };
+    if rows.len() > max_items {
+        return Err(AiFailure::output("AI returned too many action items"));
+    }
+    rows.into_iter().map(|row| {
+        let object = row.as_object().ok_or_else(|| AiFailure::output("AI action item must be an object"))?;
+        let title = required_string(object, "title", "AI action title")?;
+        let task = object.get("task").and_then(Value::as_object).map(|task| json!({
+            "title": string_text(task.get("title"), &title),
+            "subject": string_text(task.get("subject"), ""),
+            "importance": integer_value(task.get("importance"), 3).as_i64().unwrap_or(3).clamp(1, 5),
+            "notes": string_text(task.get("notes"), ""),
+        }));
+        let mut output = json!({
+            "id": uuid_string(object.get("id")),
+            "title": title,
+            "reason": string_text(object.get("reason"), ""),
+            "priority": integer_value(object.get("priority"), 3).as_i64().unwrap_or(3).clamp(1, 5),
+            "evidenceKeys": checked_evidence(object.get("evidenceKeys"), &allowed)?,
+            "task": task,
+        });
+        if minutes { output["minutes"] = json!(integer_value(object.get("minutes"), 30).as_i64().unwrap_or(30).clamp(1, 480)); }
+        Ok(output)
+    }).collect()
+}
+
+fn normalize_study_suggestions(
+    input: &Value,
+    mut object: Map<String, Value>,
+) -> Result<Value, AiFailure> {
+    Ok(json!({ "items": normalize_action_items(object.remove("items"), input, 3, false)? }))
+}
+
+fn normalize_daily_plan(input: &Value, mut object: Map<String, Value>) -> Result<Value, AiFailure> {
+    let items = normalize_action_items(object.remove("items"), input, 3, true)?;
+    if items.is_empty() {
+        return Err(AiFailure::output("daily plan requires at least one item"));
+    }
+    Ok(json!({ "items": items }))
+}
+
+fn normalize_score_prediction(
+    input: &Value,
+    mut object: Map<String, Value>,
+) -> Result<Value, AiFailure> {
+    let full_score = input
+        .get("fullScore")
+        .and_then(Value::as_f64)
+        .unwrap_or(100.0)
+        .max(1.0);
+    let point = finite_number(object.get("pointEstimate"), 0.0)
+        .as_f64()
+        .unwrap_or(0.0)
+        .clamp(0.0, full_score);
+    let lower = finite_number(object.get("lowerBound"), point)
+        .as_f64()
+        .unwrap_or(point)
+        .clamp(0.0, point);
+    let upper = finite_number(object.get("upperBound"), point)
+        .as_f64()
+        .unwrap_or(point)
+        .clamp(point, full_score);
+    let allowed = allowed_evidence(input);
+    Ok(json!({
+        "pointEstimate": point, "lowerBound": lower, "upperBound": upper,
+        "confidence": finite_number(object.get("confidence"), 0.0).as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
+        "weaknesses": string_array(object.remove("weaknesses")).into_iter().take(6).collect::<Vec<_>>(),
+        "risks": string_array(object.remove("risks")).into_iter().take(6).collect::<Vec<_>>(),
+        "recommendations": normalize_action_items(object.remove("recommendations"), input, 5, false)?,
+        "evidenceKeys": checked_evidence(object.get("evidenceKeys"), &allowed)?,
+    }))
+}
+
+fn normalize_exam_autopsy(mut object: Map<String, Value>) -> Result<Value, AiFailure> {
+    let Some(Value::Array(rows)) = object.remove("items") else {
+        return Err(AiFailure::output("exam autopsy requires items"));
+    };
+    if rows.len() > 40 {
+        return Err(AiFailure::output("exam autopsy returned too many items"));
+    }
+    let items = rows.into_iter().map(|row| {
+        let item = row.as_object().ok_or_else(|| AiFailure::output("exam autopsy item must be an object"))?;
+        let reason = match item.get("reason").and_then(Value::as_str).unwrap_or("unknown") {
+            "knowledgeGap" | "unstableMastery" | "methodError" | "calculationError" | "readingError" | "timeInsufficient" | "unanswered" | "expressionIssue" | "unknown" => item.get("reason").and_then(Value::as_str).unwrap_or("unknown"),
+            _ => "unknown",
+        };
+        Ok(json!({
+            "id": uuid_string(item.get("id")), "questionNumber": string_text(item.get("questionNumber"), ""),
+            "question": string_text(item.get("question"), ""), "userAnswer": string_text(item.get("userAnswer"), ""),
+            "correctAnswer": string_text(item.get("correctAnswer"), ""), "points": finite_number(item.get("points"), 0.0),
+            "knowledgePoints": string_array(item.get("knowledgePoints").cloned()).into_iter().take(8).collect::<Vec<_>>(),
+            "behavior": string_text(item.get("behavior"), ""), "reason": reason,
+            "evidence": string_text(item.get("evidence"), ""),
+            "confidence": finite_number(item.get("confidence"), 0.0).as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
+            "repairSuggestion": string_text(item.get("repairSuggestion"), ""),
+        }))
+    }).collect::<Result<Vec<_>, AiFailure>>()?;
+    Ok(
+        json!({ "items": items, "conclusion": string_text(object.get("conclusion"), ""), "keyProblems": string_array(object.remove("keyProblems")).into_iter().take(8).collect::<Vec<_>>(), "historicalFacts": string_array(object.remove("historicalFacts")).into_iter().take(8).collect::<Vec<_>>() }),
+    )
 }
 
 fn normalize_exam_generation(mut object: Map<String, Value>) -> Result<Value, AiFailure> {
@@ -1487,5 +1679,38 @@ mod tests {
         state.store("coach-key".into(), "{\"ok\":true}".into());
         assert_eq!(state.fresh("coach-key").as_deref(), Some("{\"ok\":true}"));
         assert!(state.stale("planner-key").is_none());
+    }
+
+    #[test]
+    fn phase3_structured_outputs_bound_items_and_reject_unknown_evidence() {
+        let prepared = prepare(request(
+            AiFeatureCallerDto::DailyPlan,
+            json!({"allowedEvidenceKeys":["grade:one", "task:two"]}),
+        ))
+        .unwrap();
+        let valid: Value = serde_json::from_str(&parse_output(&prepared, r#"{"items":[{"title":"Review","reason":"Recent result","minutes":999,"priority":99,"evidenceKeys":["grade:one"],"task":{"title":"Review","importance":9}}]}"#).unwrap()).unwrap();
+        assert_eq!(valid["items"].as_array().unwrap().len(), 1);
+        assert_eq!(valid["items"][0]["minutes"], 480);
+        assert_eq!(valid["items"][0]["priority"], 5);
+        assert!(
+            parse_output(
+                &prepared,
+                r#"{"items":[{"title":"Review","reason":"x","evidenceKeys":["unknown"]}]}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn score_prediction_normalizes_an_inverted_interval() {
+        let prepared = prepare(request(
+            AiFeatureCallerDto::ScorePrediction,
+            json!({"allowedEvidenceKeys":["grade:one"]}),
+        ))
+        .unwrap();
+        let output: Value = serde_json::from_str(&parse_output(&prepared, r#"{"pointEstimate":70,"lowerBound":80,"upperBound":60,"confidence":2,"evidenceKeys":["grade:one"],"recommendations":[]}"#).unwrap()).unwrap();
+        assert_eq!(output["lowerBound"], 70.0);
+        assert_eq!(output["upperBound"], 70.0);
+        assert_eq!(output["confidence"], 1.0);
     }
 }
