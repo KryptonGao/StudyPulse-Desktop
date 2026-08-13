@@ -29,15 +29,15 @@ pub use backup::{
     BackupResolution, ImportReport, RestoreMode,
 };
 pub use features::{
-    CoachAnalysis, CoachAnalysisResponse, CoachChat, CoachConversationMessage, CoachData,
-    CoachDataRow, CoachEvidence, CoachGoal, CoachGoalStatus, CoachGoalSubject, CoachPrediction,
-    CoachProposal, CoachProposalItem, CoachProposalStatus, CoachRisk, CoachStopCondition,
-    DailyExamTask, DailyReportPoint, ExamGoal, ExamGradeResponse, ExamPlan, ExamPlanPhase,
-    ExamQuestion, ExamQuestionKind, ExamQuestionRecord, ExamQuestionResult, ExamRoleAnalysis,
-    ExamSimulation, ExamSimulationEvent, ExamSimulationEventKind, ExamSimulationStatus,
-    ExamWeakPoint, LearningReport, ReversePlannerResponse, coach_row_payload, decode_coach_payload,
-    default_simulation, expired, learning_report, make_coach_row, parse_structured_json,
-    proposal_task, validate_report_range,
+    AiActionApplication, AiFeatureRecord, CoachAnalysis, CoachAnalysisResponse, CoachChat,
+    CoachConversationMessage, CoachData, CoachDataRow, CoachEvidence, CoachGoal, CoachGoalStatus,
+    CoachGoalSubject, CoachPrediction, CoachProposal, CoachProposalItem, CoachProposalStatus,
+    CoachRisk, CoachStopCondition, DailyExamTask, DailyReportPoint, ExamGoal, ExamGradeResponse,
+    ExamPlan, ExamPlanPhase, ExamQuestion, ExamQuestionKind, ExamQuestionRecord,
+    ExamQuestionResult, ExamRoleAnalysis, ExamSimulation, ExamSimulationEvent,
+    ExamSimulationEventKind, ExamSimulationStatus, ExamWeakPoint, LearningReport,
+    ReversePlannerResponse, coach_row_payload, decode_coach_payload, default_simulation, expired,
+    learning_report, make_coach_row, parse_structured_json, proposal_task, validate_report_range,
 };
 pub use models::{
     AgentMessage, AgentMessageRole, AgentNotebook, AgentTurn, ComprehensiveExam,

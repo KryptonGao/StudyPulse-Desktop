@@ -864,6 +864,68 @@ pub fn default_simulation(subject: String, now: Option<String>) -> ExamSimulatio
     }
 }
 
+/// Generic persisted envelope for Phase 3 AI feature results.
+///
+/// The payload remains feature-owned JSON so an older desktop client can
+/// preserve newly introduced output fields.  The envelope itself is typed,
+/// validated and stored in one of the five Phase 3 JSONL collections.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiFeatureRecord {
+    pub id: Uuid,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default = "default_ai_record_status")]
+    pub status: String,
+    #[serde(default)]
+    pub payload: Value,
+    /// An action key is recorded only after Core has completed its local
+    /// write.  This makes retried batch confirmation idempotent.
+    #[serde(default)]
+    pub applied_actions: BTreeMap<String, AiActionApplication>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn default_ai_record_status() -> String {
+    "draft".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiActionApplication {
+    pub target_id: Uuid,
+    pub applied_at: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl AiFeatureRecord {
+    pub fn validate(&self, file: &str) -> crate::Result<()> {
+        if self.created_at.is_empty() || self.updated_at.is_empty() {
+            return Err(WorkspaceError::MalformedData {
+                path: format!("Data/{file}"),
+                detail: "AI feature timestamps must not be empty".into(),
+            });
+        }
+        for value in [&self.created_at, &self.updated_at] {
+            DateTime::parse_from_rfc3339(value).map_err(|error| WorkspaceError::MalformedData {
+                path: format!("Data/{file}"),
+                detail: format!("invalid AI feature timestamp: {error}"),
+            })?;
+        }
+        if !self.payload.is_object() {
+            return Err(WorkspaceError::MalformedData {
+                path: format!("Data/{file}"),
+                detail: "AI feature payload must be a JSON object".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 /// One day in the local learning report, with averaged diary dimensions.

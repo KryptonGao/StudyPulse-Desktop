@@ -616,6 +616,56 @@ async fn get_ai_diagnostics(state: State<'_, AppState>) -> Result<String, AppErr
 }
 
 #[tauri::command]
+async fn get_phase3_records(
+    kind: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    core_call(state, move |core| core.get_phase3_records_json(kind)).await
+}
+
+#[tauri::command]
+async fn upsert_phase3_record(
+    kind: String,
+    value_json: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    core_call(state, move |core| core.upsert_phase3_record_json(kind, value_json)).await
+}
+
+#[tauri::command]
+async fn delete_phase3_record(
+    kind: String,
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    core_call(state, move |core| core.delete_phase3_record(kind, id)).await
+}
+
+#[tauri::command]
+async fn apply_phase3_task_actions(
+    kind: String,
+    record_id: String,
+    action_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    core_call(state, move |core| {
+        core.apply_phase3_task_actions(kind, record_id, action_ids)
+    }).await
+}
+
+#[tauri::command]
+async fn apply_exam_autopsy_actions(
+    record_id: String,
+    mistake_item_ids: Vec<String>,
+    task_item_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<String, AppError> {
+    core_call(state, move |core| {
+        core.apply_exam_autopsy_actions(record_id, mistake_item_ids, task_item_ids)
+    }).await
+}
+
+#[tauri::command]
 // `after_sequence` is a monotonic cursor, not an array offset. Keeping it in
 // the command contract lets the frontend resume polling without losing events
 // when multiple events arrive between requests.
@@ -1247,6 +1297,11 @@ pub fn run() {
             get_agent_turn_result,
             run_ai_feature,
             get_ai_diagnostics,
+            get_phase3_records,
+            upsert_phase3_record,
+            delete_phase3_record,
+            apply_phase3_task_actions,
+            apply_exam_autopsy_actions,
             wait_agent_events,
             cancel_agent,
             submit_confirmation,

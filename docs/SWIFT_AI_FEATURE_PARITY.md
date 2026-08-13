@@ -136,6 +136,10 @@ Swift 端的 AI 功能大多是“固定业务上下文 → 结构化输出 → 
 
 ### Phase 3：学习与考试 AI
 
+> 桌面端实现状态（2026-08-13）：已完成 AI 闭环版本。Home Ask、学习建议和 Daily Plan 已嵌入 Today；单科/综合分数预测、预测讨论和 Exam Autopsy 已嵌入 Exams。Core 只接受标识和用户输入并自行聚合受限 Workspace 上下文，模型只能引用提供的 evidence key。结果保存在五个可选 JSONL 域（`home_ask_sessions`、`study_suggestions`、`daily_ai_plans`、`score_predictions`、`exam_autopsies`），因此不会升级 Workspace schema，也不会使旧备份失效。任务/错题均须逐项确认，采用来源记录与 action ID 派生 UUID 实现重试幂等。
+
+> 数据边界与已知限制：本阶段没有手动健康输入、HealthKit、后台刷新或通知；若用户询问准备度、睡眠、HRV 或健康，Home Ask 会明确说明必须等待 Phase 4 的真实数据源。分数预测每科至少需要四条有效成绩，综合考试要求全部科目满足门槛；它是 AI 估计而非本地 EWMA 预测或结果保证。Exam Autopsy 首版仅支持普通单科考试，最多四张、每张最多 8 MiB 的图片，删除复盘不会删除可能仍被错题引用的图片。
+
 目标：把 AI 从单条记录扩展到日常学习决策和考试复盘。
 
 1. 迁移 Home Ask，上下文路由覆盖成绩、错题、趋势和可用的准备度数据。

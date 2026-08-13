@@ -30,12 +30,12 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    AgentNotebook, AgentTurn, CoachAnalysis, CoachChat, CoachConversationMessage, CoachData,
-    CoachDataRow, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal,
-    ExamPlan, ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull, Result,
-    Routine, RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession, SubTask,
-    Subject, TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo, decode_coach_payload,
-    learning_report, make_coach_row, platform::is_link_like,
+    AgentNotebook, AgentTurn, AiFeatureRecord, CoachAnalysis, CoachChat, CoachConversationMessage,
+    CoachData, CoachDataRow, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull,
+    ExamGoal, ExamPlan, ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull,
+    Result, Routine, RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession,
+    SubTask, Subject, TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo,
+    decode_coach_payload, learning_report, make_coach_row, platform::is_link_like,
     safe_path::ensure_no_symlink_components,
 };
 
@@ -124,6 +124,11 @@ impl Workspace {
             "exam_goals.jsonl",
             "exam_plans.jsonl",
             "exam_simulations.jsonl",
+            "home_ask_sessions.jsonl",
+            "study_suggestions.jsonl",
+            "daily_ai_plans.jsonl",
+            "score_predictions.jsonl",
+            "exam_autopsies.jsonl",
         ] {
             let path = root.join("Data").join(file);
             if !path.exists() {
@@ -908,6 +913,80 @@ impl Workspace {
         self.delete_jsonl_record::<ExamSimulation>("Data/exam_simulations.jsonl", id)
     }
 
+    /// Phase 3 records are optional for existing Workspaces.  A missing file
+    /// is therefore read as an empty collection; new Workspaces create all
+    /// files above and every write keeps the shared JSONL atomicity contract.
+    fn read_ai_feature_records(&self, file: &str) -> Result<Vec<AiFeatureRecord>> {
+        let path = self.root().join("Data").join(file);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let values: Vec<AiFeatureRecord> = self.read_jsonl_records(&format!("Data/{file}"))?;
+        for value in &values {
+            value.validate(file)?;
+        }
+        Ok(values)
+    }
+
+    fn upsert_ai_feature_record(&self, file: &str, value: AiFeatureRecord) -> Result<()> {
+        value.validate(file)?;
+        self.upsert_jsonl_record(&format!("Data/{file}"), value, |value| value.id)
+    }
+
+    fn delete_ai_feature_record(&self, file: &str, id: Uuid) -> Result<()> {
+        self.delete_jsonl_record::<AiFeatureRecord>(&format!("Data/{file}"), id)
+    }
+
+    pub fn read_home_ask_sessions(&self) -> Result<Vec<AiFeatureRecord>> {
+        self.read_ai_feature_records("home_ask_sessions.jsonl")
+    }
+    pub fn upsert_home_ask_session(&self, value: AiFeatureRecord) -> Result<()> {
+        self.upsert_ai_feature_record("home_ask_sessions.jsonl", value)
+    }
+    pub fn delete_home_ask_session(&self, id: Uuid) -> Result<()> {
+        self.delete_ai_feature_record("home_ask_sessions.jsonl", id)
+    }
+
+    pub fn read_study_suggestions(&self) -> Result<Vec<AiFeatureRecord>> {
+        self.read_ai_feature_records("study_suggestions.jsonl")
+    }
+    pub fn upsert_study_suggestion(&self, value: AiFeatureRecord) -> Result<()> {
+        self.upsert_ai_feature_record("study_suggestions.jsonl", value)
+    }
+    pub fn delete_study_suggestion(&self, id: Uuid) -> Result<()> {
+        self.delete_ai_feature_record("study_suggestions.jsonl", id)
+    }
+
+    pub fn read_daily_ai_plans(&self) -> Result<Vec<AiFeatureRecord>> {
+        self.read_ai_feature_records("daily_ai_plans.jsonl")
+    }
+    pub fn upsert_daily_ai_plan(&self, value: AiFeatureRecord) -> Result<()> {
+        self.upsert_ai_feature_record("daily_ai_plans.jsonl", value)
+    }
+    pub fn delete_daily_ai_plan(&self, id: Uuid) -> Result<()> {
+        self.delete_ai_feature_record("daily_ai_plans.jsonl", id)
+    }
+
+    pub fn read_score_predictions(&self) -> Result<Vec<AiFeatureRecord>> {
+        self.read_ai_feature_records("score_predictions.jsonl")
+    }
+    pub fn upsert_score_prediction(&self, value: AiFeatureRecord) -> Result<()> {
+        self.upsert_ai_feature_record("score_predictions.jsonl", value)
+    }
+    pub fn delete_score_prediction(&self, id: Uuid) -> Result<()> {
+        self.delete_ai_feature_record("score_predictions.jsonl", id)
+    }
+
+    pub fn read_exam_autopsies(&self) -> Result<Vec<AiFeatureRecord>> {
+        self.read_ai_feature_records("exam_autopsies.jsonl")
+    }
+    pub fn upsert_exam_autopsy(&self, value: AiFeatureRecord) -> Result<()> {
+        self.upsert_ai_feature_record("exam_autopsies.jsonl", value)
+    }
+    pub fn delete_exam_autopsy(&self, id: Uuid) -> Result<()> {
+        self.delete_ai_feature_record("exam_autopsies.jsonl", id)
+    }
+
     /// Decode the compact Coach JSONL rows into typed collections.
     /// Unknown rows and row-level extras are retained so a newer client can be
     /// round-tripped even when this build cannot interpret its row kind.
@@ -1661,6 +1740,27 @@ mod tests {
         };
         workspace.append_task(task.clone()).unwrap();
         assert_eq!(workspace.read_tasks().unwrap(), vec![task]);
+    }
+
+    #[test]
+    fn phase3_optional_collections_round_trip_without_changing_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let id = Uuid::new_v4();
+        let value = crate::AiFeatureRecord {
+            id,
+            created_at: "2026-08-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            status: "draft".into(),
+            payload: serde_json::json!({"items": []}),
+            applied_actions: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        };
+        workspace.upsert_study_suggestion(value.clone()).unwrap();
+        assert_eq!(workspace.read_study_suggestions().unwrap(), vec![value]);
+        workspace.delete_study_suggestion(id).unwrap();
+        assert!(workspace.read_study_suggestions().unwrap().is_empty());
+        assert_eq!(workspace.info().schema_version, 1);
     }
 
     #[test]

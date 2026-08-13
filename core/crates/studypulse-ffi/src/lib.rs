@@ -24,16 +24,16 @@ use studypulse_model_client::{
 use studypulse_tools::PermissionLevel;
 use studypulse_workspace::{
     AgentMessage, AgentMessageRole, AgentNotebook, AgentTurn as WorkspaceAgentTurn,
-    BackupExportOptions, BackupInspection, BackupResolution, CoachAnalysis, CoachChat,
-    CoachConversationMessage, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry,
-    DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal, ExamPlan, ExamReview,
-    ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade, HandwritingAnswerEntry,
-    HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull,
-    PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType, SafeRelativePath,
-    SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource, SubTask, Subject,
-    TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme,
-    TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, expired,
-    parse_structured_json, proposal_task,
+    AiActionApplication, AiFeatureRecord, BackupExportOptions, BackupInspection, BackupResolution,
+    CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal, CoachProposal,
+    ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal,
+    ExamPlan, ExamReview, ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade,
+    HandwritingAnswerEntry, HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry,
+    MistakeNoteFull, PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType,
+    SafeRelativePath, SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource,
+    SubTask, Subject, TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary,
+    TimeInvestmentTheme, TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo,
+    default_simulation, expired, parse_structured_json, proposal_task,
 };
 use thiserror::Error;
 
@@ -1321,6 +1321,7 @@ impl StudyPulseCore {
         // A feature caller is a bounded, synchronous facade over the existing
         // event-driven Agent.  The frontend receives one validated result, so
         // prompts and model JSON never need to be interpreted in React.
+        let request = self.hydrate_ai_feature_request(request)?;
         let prepared = ai::prepare(request).map_err(CoreError::message)?;
         let started = Instant::now();
         if let Some(output_json) = self.ai_state.lock().fresh(&prepared.cache_key) {
@@ -1455,6 +1456,346 @@ impl StudyPulseCore {
         // Diagnostics deliberately contain only caller/timing/cache metadata;
         // prompt, model output, credentials, and Workspace contents stay out.
         self.ai_state.lock().diagnostics_json()
+    }
+
+    /// Read one of the optional Phase 3 collections.  These remain JSON at the
+    /// FFI edge while Workspace validates the shared record envelope.
+    pub fn get_phase3_records_json(&self, kind: String) -> Result<Vec<String>, CoreError> {
+        let workspace = self.workspace()?;
+        let values = match kind.as_str() {
+            "homeAsk" => workspace.read_home_ask_sessions(),
+            "suggestions" => workspace.read_study_suggestions(),
+            "dailyPlans" => workspace.read_daily_ai_plans(),
+            "predictions" => workspace.read_score_predictions(),
+            "autopsies" => workspace.read_exam_autopsies(),
+            _ => return Err(CoreError::message("unknown Phase 3 record collection")),
+        }
+        .map_err(CoreError::message)?;
+        values
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).map_err(CoreError::message))
+            .collect()
+    }
+
+    pub fn upsert_phase3_record_json(
+        &self,
+        kind: String,
+        value_json: String,
+    ) -> Result<(), CoreError> {
+        let value: AiFeatureRecord =
+            parse_structured_json(&value_json).map_err(CoreError::message)?;
+        let workspace = self.workspace()?;
+        match kind.as_str() {
+            "homeAsk" => workspace.upsert_home_ask_session(value),
+            "suggestions" => workspace.upsert_study_suggestion(value),
+            "dailyPlans" => workspace.upsert_daily_ai_plan(value),
+            "predictions" => workspace.upsert_score_prediction(value),
+            "autopsies" => workspace.upsert_exam_autopsy(value),
+            _ => return Err(CoreError::message("unknown Phase 3 record collection")),
+        }
+        .map_err(CoreError::message)
+    }
+
+    pub fn delete_phase3_record(&self, kind: String, id: String) -> Result<(), CoreError> {
+        let id = parse_uuid(&id)?;
+        let workspace = self.workspace()?;
+        match kind.as_str() {
+            "homeAsk" => workspace.delete_home_ask_session(id),
+            "suggestions" => workspace.delete_study_suggestion(id),
+            "dailyPlans" => workspace.delete_daily_ai_plan(id),
+            "predictions" => workspace.delete_score_prediction(id),
+            "autopsies" => workspace.delete_exam_autopsy(id),
+            _ => return Err(CoreError::message("unknown Phase 3 record collection")),
+        }
+        .map_err(CoreError::message)
+    }
+
+    /// Apply selected task drafts exactly once.  The action key is durable and
+    /// the generated UUID is derived from record/action identity, so a retry
+    /// after an interrupted batch cannot create a duplicate task.
+    pub fn apply_phase3_task_actions(
+        &self,
+        kind: String,
+        record_id: String,
+        action_ids: Vec<String>,
+    ) -> Result<String, CoreError> {
+        let id = parse_uuid(&record_id)?;
+        let workspace = self.workspace()?;
+        let mut values = match kind.as_str() {
+            "suggestions" => workspace.read_study_suggestions(),
+            "dailyPlans" => workspace.read_daily_ai_plans(),
+            "predictions" => workspace.read_score_predictions(),
+            _ => {
+                return Err(CoreError::message(
+                    "this Phase 3 collection has no task actions",
+                ));
+            }
+        }
+        .map_err(CoreError::message)?;
+        let record = values
+            .iter_mut()
+            .find(|value| value.id == id)
+            .ok_or_else(|| CoreError::message("Phase 3 record not found"))?;
+        // Clone the selected drafts before recording applications below.  This
+        // keeps the immutable payload lookup separate from mutation of the
+        // durable applied-actions map.
+        let items = record
+            .payload
+            .get("items")
+            .or_else(|| record.payload.get("recommendations"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or_else(|| CoreError::message("Phase 3 record has no task drafts"))?;
+        let mut results = Vec::new();
+        for action_id in action_ids {
+            if let Some(existing) = record.applied_actions.get(&action_id) {
+                results.push(serde_json::json!({"actionId": action_id, "targetId": existing.target_id, "alreadyApplied": true}));
+                continue;
+            }
+            let item = items
+                .iter()
+                .find(|item| {
+                    item.get("id").and_then(serde_json::Value::as_str) == Some(action_id.as_str())
+                })
+                .ok_or_else(|| CoreError::message("selected action is not in this record"))?;
+            let task = item
+                .get("task")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| CoreError::message("selected action has no task draft"))?;
+            let task_id = phase3_action_uuid(id, &action_id);
+            let now = chrono::Utc::now().to_rfc3339();
+            let value = TaskItem {
+                id: task_id,
+                title: task
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Study task")
+                    .to_owned(),
+                task_type: TaskType::Homework,
+                due_date: (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                reminder_date: now.clone(),
+                subject: task
+                    .get("subject")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                importance: task
+                    .get("importance")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(3)
+                    .clamp(1, 5) as u8,
+                notes: task
+                    .get("notes")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                is_completed: false,
+                reminder_event_id: None,
+                reminder_calendar_id: None,
+                created_at: now.clone(),
+                phase_id: None,
+                coach_execution_data: None,
+                coach_goal_id: None,
+                coach_proposal_id: None,
+                extra: BTreeMap::new(),
+            };
+            value.validate().map_err(CoreError::message)?;
+            workspace.upsert_task(value).map_err(CoreError::message)?;
+            record.applied_actions.insert(
+                action_id.clone(),
+                AiActionApplication {
+                    target_id: task_id,
+                    applied_at: now,
+                    kind: "task".into(),
+                    extra: BTreeMap::new(),
+                },
+            );
+            results.push(serde_json::json!({"actionId": action_id, "targetId": task_id, "alreadyApplied": false}));
+        }
+        record.updated_at = chrono::Utc::now().to_rfc3339();
+        match kind.as_str() {
+            "suggestions" => workspace.upsert_study_suggestion(record.clone()),
+            "dailyPlans" => workspace.upsert_daily_ai_plan(record.clone()),
+            "predictions" => workspace.upsert_score_prediction(record.clone()),
+            _ => unreachable!(),
+        }
+        .map_err(CoreError::message)?;
+        serde_json::to_string(&results).map_err(CoreError::message)
+    }
+
+    /// Materialize selected Exam Autopsy drafts.  Mistake and repair-task
+    /// selections have distinct durable action ids, so either can be retried
+    /// without duplicating the other after a crash or repeated confirmation.
+    pub fn apply_exam_autopsy_actions(
+        &self,
+        record_id: String,
+        mistake_item_ids: Vec<String>,
+        task_item_ids: Vec<String>,
+    ) -> Result<String, CoreError> {
+        let id = parse_uuid(&record_id)?;
+        let workspace = self.workspace()?;
+        let mut records = workspace
+            .read_exam_autopsies()
+            .map_err(CoreError::message)?;
+        let record = records
+            .iter_mut()
+            .find(|value| value.id == id)
+            .ok_or_else(|| CoreError::message("Exam Autopsy record not found"))?;
+        let items = record
+            .payload
+            .get("items")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or_else(|| CoreError::message("Exam Autopsy record has no items"))?;
+        let images = record
+            .payload
+            .get("imagePaths")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut results = Vec::new();
+        for (kind, selected) in [("mistake", mistake_item_ids), ("task", task_item_ids)] {
+            for item_id in selected {
+                let action_id = format!("{kind}:{item_id}");
+                if let Some(existing) = record.applied_actions.get(&action_id) {
+                    results.push(serde_json::json!({"actionId": action_id, "targetId": existing.target_id, "alreadyApplied": true}));
+                    continue;
+                }
+                let item = items
+                    .iter()
+                    .find(|value| {
+                        value.get("id").and_then(serde_json::Value::as_str)
+                            == Some(item_id.as_str())
+                    })
+                    .ok_or_else(|| {
+                        CoreError::message("selected autopsy item is not in this record")
+                    })?;
+                let now = chrono::Utc::now().to_rfc3339();
+                let target_id = phase3_action_uuid(id, &action_id);
+                if kind == "mistake" {
+                    let value = MistakeNoteFull {
+                        id: target_id,
+                        title: item
+                            .get("questionNumber")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|v| !v.is_empty())
+                            .map(|v| format!("Exam question {v}"))
+                            .unwrap_or_else(|| "Exam Autopsy mistake".into()),
+                        subject: record
+                            .payload
+                            .get("subject")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        original_question: item
+                            .get("question")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        source: "Exam Autopsy".into(),
+                        date: now.clone(),
+                        error_reason: item
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                        wrong_solution: item
+                            .get("userAnswer")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        correct_solution: item
+                            .get("correctAnswer")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        question_images: images.clone(),
+                        reason_images: Vec::new(),
+                        wrong_solution_images: Vec::new(),
+                        correct_solution_images: Vec::new(),
+                        review_state: None,
+                        phase_id: None,
+                        exposure_count: 0,
+                        mastery_score: 0.0,
+                        mastery_history: Vec::new(),
+                        handwriting_history: Vec::new(),
+                        difficulty: 3,
+                        tags: item
+                            .get("knowledgePoints")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        audio_file_name: None,
+                        extra: BTreeMap::new(),
+                    };
+                    workspace
+                        .upsert_mistake(value)
+                        .map_err(CoreError::message)?;
+                } else {
+                    let value = TaskItem {
+                        id: target_id,
+                        title: item
+                            .get("repairSuggestion")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or("Review exam mistake")
+                            .to_owned(),
+                        task_type: TaskType::Homework,
+                        due_date: (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+                        reminder_date: now.clone(),
+                        subject: record
+                            .payload
+                            .get("subject")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        importance: 3,
+                        notes: item
+                            .get("evidence")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        is_completed: false,
+                        reminder_event_id: None,
+                        reminder_calendar_id: None,
+                        created_at: now.clone(),
+                        phase_id: None,
+                        coach_execution_data: None,
+                        coach_goal_id: None,
+                        coach_proposal_id: None,
+                        extra: BTreeMap::new(),
+                    };
+                    workspace.upsert_task(value).map_err(CoreError::message)?;
+                }
+                record.applied_actions.insert(
+                    action_id.clone(),
+                    AiActionApplication {
+                        target_id,
+                        applied_at: now,
+                        kind: kind.into(),
+                        extra: BTreeMap::new(),
+                    },
+                );
+                results.push(serde_json::json!({"actionId": action_id, "targetId": target_id, "alreadyApplied": false}));
+            }
+        }
+        record.updated_at = chrono::Utc::now().to_rfc3339();
+        workspace
+            .upsert_exam_autopsy(record.clone())
+            .map_err(CoreError::message)?;
+        serde_json::to_string(&results).map_err(CoreError::message)
     }
 
     pub fn list_agent_capabilities(&self) -> Vec<CapabilityManifestDto> {
@@ -2684,6 +3025,227 @@ impl StudyPulseCore {
         Ok(())
     }
 
+    fn hydrate_ai_feature_request(
+        &self,
+        mut request: AiFeatureRequestDto,
+    ) -> Result<AiFeatureRequestDto, CoreError> {
+        use serde_json::{Value, json};
+        let supplied: Value = serde_json::from_str(&request.input_json).map_err(|error| {
+            CoreError::message(format!("AI feature input is not valid JSON: {error}"))
+        })?;
+        if !supplied.is_object() {
+            return Err(CoreError::message("AI feature input must be an object"));
+        }
+        if !matches!(
+            request.caller,
+            AiFeatureCallerDto::HomeAsk
+                | AiFeatureCallerDto::StudySuggestions
+                | AiFeatureCallerDto::DailyPlan
+                | AiFeatureCallerDto::ScorePrediction
+                | AiFeatureCallerDto::PredictionDiscussion
+                | AiFeatureCallerDto::ExamAutopsy
+                | AiFeatureCallerDto::Coach
+                | AiFeatureCallerDto::ReversePlanner
+                | AiFeatureCallerDto::ExamSimulation
+                | AiFeatureCallerDto::Chat
+        ) {
+            return Ok(request);
+        }
+        let workspace = self.workspace()?;
+        let grades = workspace.read_grades().map_err(CoreError::message)?;
+        let mistakes = workspace.read_mistakes().map_err(CoreError::message)?;
+        let tasks = workspace.read_tasks().map_err(CoreError::message)?;
+        let subjects = workspace.read_subjects().map_err(CoreError::message)?;
+        let report = workspace.learning_report(30).map_err(CoreError::message)?;
+        let evidence = ai_evidence(&grades, &mistakes, &tasks);
+        let allowed: Vec<String> = evidence
+            .iter()
+            .filter_map(|value| value.get("key").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        let common = json!({
+            "allowedEvidenceKeys": allowed,
+            "evidence": evidence,
+            "grades": grades.iter().rev().take(20).map(|value| json!({"id":value.id,"subject":value.subject,"score":value.score,"fullScore":value.full_score,"date":value.date,"examId":value.exam_id,"examName":value.exam_name})).collect::<Vec<_>>(),
+            "mistakes": mistakes.iter().take(20).map(|value| json!({"id":value.id,"subject":value.subject,"title":value.title,"mastery":value.mastery_score,"difficulty":value.difficulty,"tags":value.tags})).collect::<Vec<_>>(),
+            "openTasks": tasks.iter().filter(|value| !value.is_completed).take(20).map(|value| json!({"id":value.id,"title":value.title,"subject":value.subject,"importance":value.importance,"dueDate":value.due_date})).collect::<Vec<_>>(),
+            "trends": {"studyMinutes":report.total_study_minutes,"sessionCount":report.session_count,"averageScoreRate":report.average_score_rate,"weakestSubject":report.weakest_subject,"mistakeCount":report.mistake_count}
+        });
+        let input = match request.caller {
+            AiFeatureCallerDto::Coach => {
+                json!({"goal": supplied.get("goal").cloned().unwrap_or(Value::Null), "context": common})
+            }
+            AiFeatureCallerDto::ReversePlanner => {
+                json!({"goal": supplied.get("goal").cloned().unwrap_or(Value::Null), "context": common})
+            }
+            AiFeatureCallerDto::ExamSimulation => {
+                let mut value = supplied.as_object().cloned().expect("object checked above");
+                value.insert("context".into(), common);
+                Value::Object(value)
+            }
+            AiFeatureCallerDto::Chat => {
+                let goal = supplied.get("goal").cloned().unwrap_or(Value::Null);
+                let message = supplied
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let coach = workspace.read_coach_data().map_err(CoreError::message)?;
+                let goal_id = goal.get("id").and_then(Value::as_str);
+                let chat_id = goal_id.and_then(|goal_id| {
+                    coach
+                        .chats
+                        .iter()
+                        .find(|chat| chat.goal_id.is_some_and(|id| id.to_string() == goal_id))
+                        .map(|chat| chat.id)
+                });
+                let history = chat_id
+                    .map(|id| {
+                        coach
+                            .messages
+                            .iter()
+                            .filter(|entry| entry.chat_id == id)
+                            .rev()
+                            .take(20)
+                            .map(|entry| json!({"role":entry.role,"content":entry.content}))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                json!({"goal":goal,"message":message,"history":history,"context":common})
+            }
+            AiFeatureCallerDto::HomeAsk => {
+                let session_id = supplied
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| CoreError::message("Home Ask requires sessionId"))?;
+                let message = supplied
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| CoreError::message("Home Ask requires a message"))?;
+                let session_id = parse_uuid(session_id)?;
+                let session = workspace
+                    .read_home_ask_sessions()
+                    .map_err(CoreError::message)?
+                    .into_iter()
+                    .find(|value| value.id == session_id);
+                let history = session
+                    .and_then(|value| {
+                        value
+                            .payload
+                            .get("messages")
+                            .and_then(Value::as_array)
+                            .cloned()
+                    })
+                    .unwrap_or_default();
+                json!({"question":message,"history":history.into_iter().rev().take(20).collect::<Vec<_>>(),"readinessAvailable":false,"context":common})
+            }
+            AiFeatureCallerDto::StudySuggestions | AiFeatureCallerDto::DailyPlan => {
+                json!({"date":supplied.get("date").and_then(Value::as_str).unwrap_or(""),"context":common,"allowedEvidenceKeys":common["allowedEvidenceKeys"].clone()})
+            }
+            AiFeatureCallerDto::ScorePrediction => {
+                let kind = supplied
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("single");
+                let id = parse_uuid(
+                    supplied
+                        .get("examId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| CoreError::message("score prediction requires examId"))?,
+                )?;
+                if kind == "comprehensive" {
+                    let exam = workspace
+                        .read_comprehensive_exams()
+                        .map_err(CoreError::message)?
+                        .into_iter()
+                        .find(|value| value.id == id)
+                        .ok_or_else(|| CoreError::message("comprehensive exam not found"))?;
+                    let mut per_subject = Vec::new();
+                    let mut total_full = 0.0;
+                    for subject in &exam.subject {
+                        let values = grades_for_subject(&grades, subject, None);
+                        if values.len() < 4 {
+                            return Err(CoreError::message(format!(
+                                "{subject} needs at least 4 valid grades before prediction"
+                            )));
+                        }
+                        let full = subjects
+                            .iter()
+                            .find(|value| value.name == *subject)
+                            .map(|value| value.full_score)
+                            .unwrap_or(100.0);
+                        total_full += full;
+                        per_subject.push(json!({"subject":subject,"fullScore":full,"grades":values.iter().map(|value| json!({"id":value.id,"score":value.score,"fullScore":value.full_score,"date":value.date,"examName":value.exam_name})).collect::<Vec<_>>() }));
+                    }
+                    json!({"kind":"comprehensive","examId":id,"examName":exam.name,"fullScore":total_full,"subjects":per_subject,"context":common,"allowedEvidenceKeys":common["allowedEvidenceKeys"].clone()})
+                } else {
+                    let exam = workspace
+                        .read_exams()
+                        .map_err(CoreError::message)?
+                        .into_iter()
+                        .find(|value| value.id == id)
+                        .ok_or_else(|| CoreError::message("exam not found"))?;
+                    let values = grades_for_subject(&grades, &exam.subject, Some(id));
+                    if values.len() < 4 {
+                        return Err(CoreError::message(
+                            "this exam subject needs at least 4 valid grades before prediction",
+                        ));
+                    }
+                    let full = subjects
+                        .iter()
+                        .find(|value| value.name == exam.subject)
+                        .map(|value| value.full_score)
+                        .unwrap_or(100.0);
+                    json!({"kind":"single","examId":id,"examName":exam.name,"subject":exam.subject,"fullScore":full,"grades":values.iter().map(|value| json!({"id":value.id,"score":value.score,"fullScore":value.full_score,"date":value.date,"examName":value.exam_name})).collect::<Vec<_>>(),"context":common,"allowedEvidenceKeys":common["allowedEvidenceKeys"].clone()})
+                }
+            }
+            AiFeatureCallerDto::PredictionDiscussion => {
+                let id = parse_uuid(
+                    supplied
+                        .get("predictionId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            CoreError::message("prediction discussion requires predictionId")
+                        })?,
+                )?;
+                let message = supplied
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        CoreError::message("prediction discussion requires a message")
+                    })?;
+                let prediction = workspace
+                    .read_score_predictions()
+                    .map_err(CoreError::message)?
+                    .into_iter()
+                    .find(|value| value.id == id)
+                    .ok_or_else(|| CoreError::message("prediction not found"))?;
+                json!({"prediction":prediction.payload,"message":message,"context":common})
+            }
+            AiFeatureCallerDto::ExamAutopsy => {
+                let id = parse_uuid(
+                    supplied
+                        .get("examId")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| CoreError::message("exam autopsy requires examId"))?,
+                )?;
+                let exam = workspace
+                    .read_exams()
+                    .map_err(CoreError::message)?
+                    .into_iter()
+                    .find(|value| value.id == id)
+                    .ok_or_else(|| CoreError::message("exam not found"))?;
+                json!({"examId":id,"examName":exam.name,"subject":exam.subject,"context":common})
+            }
+            _ => unreachable!(),
+        };
+        request.input_json = serde_json::to_string(&input).map_err(CoreError::message)?;
+        Ok(request)
+    }
+
     fn install_workspace(&self, workspace: Workspace) {
         // Installing a Workspace resets run/inspection identity and rebuilds the
         // Agent against the currently selected model.  It never migrates a
@@ -2769,6 +3331,66 @@ impl StudyPulseCore {
     }
 }
 
+/// Small, bounded evidence projections keep model prompts auditable while
+/// preventing arbitrary Workspace identifiers from being cited in an answer.
+fn ai_evidence(
+    grades: &[Grade],
+    mistakes: &[MistakeNoteFull],
+    tasks: &[TaskItem],
+) -> Vec<serde_json::Value> {
+    let mut evidence = Vec::new();
+    evidence.extend(grades.iter().rev().take(20).map(|grade| {
+        serde_json::json!({
+            "key": format!("grade:{}", grade.id),
+            "type": "grade",
+            "label": format!("{}: {}", grade.subject, grade.exam_name),
+        })
+    }));
+    evidence.extend(mistakes.iter().take(20).map(|mistake| {
+        serde_json::json!({
+            "key": format!("mistake:{}", mistake.id),
+            "type": "mistake",
+            "label": mistake.title,
+        })
+    }));
+    evidence.extend(
+        tasks
+            .iter()
+            .filter(|task| !task.is_completed)
+            .take(20)
+            .map(|task| {
+                serde_json::json!({
+                    "key": format!("task:{}", task.id),
+                    "type": "task",
+                    "label": task.title,
+                })
+            }),
+    );
+    evidence
+}
+
+/// Prediction eligibility is intentionally based on valid subject history,
+/// rather than requiring a link only newer desktop grades contain.  `exam_id`
+/// is retained for provenance; legacy grades use their subject (and, elsewhere,
+/// normalised exam name) without silently rewriting storage.
+fn grades_for_subject<'a>(
+    grades: &'a [Grade],
+    subject: &str,
+    _exam_id: Option<uuid::Uuid>,
+) -> Vec<&'a Grade> {
+    grades
+        .iter()
+        .filter(|grade| {
+            grade.subject == subject
+                && grade.score.is_finite()
+                && grade.score >= 0.0
+                && grade.full_score.unwrap_or(100.0).is_finite()
+                && grade.full_score.unwrap_or(100.0) > 0.0
+                && chrono::DateTime::parse_from_rfc3339(&grade.date).is_ok()
+        })
+        .collect()
+}
+
 fn run_async<T>(
     future: impl std::future::Future<Output = Result<T, studypulse_model_client::ModelError>>,
 ) -> Result<T, studypulse_model_client::ModelError> {
@@ -2783,6 +3405,21 @@ fn run_async<T>(
         .build()
         .map_err(|error| studypulse_model_client::ModelError::Request(error.to_string()))?
         .block_on(future)
+}
+
+fn phase3_action_uuid(record_id: uuid::Uuid, action_id: &str) -> uuid::Uuid {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(record_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(action_id.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hasher.finalize()[..16]);
+    // Mark the deterministic value as an RFC 4122 UUID without depending on
+    // the optional uuid-v5 crate feature.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes)
 }
 
 struct RestoreFlagGuard<'a>(&'a AtomicBool);
