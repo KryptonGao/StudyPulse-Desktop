@@ -101,6 +101,12 @@ impl Workspace {
             ".studypulse/recovery",
             ".studypulse/index",
         ] {
+            if directory.starts_with("Agent/") {
+                // Agent directories may already exist in a user-modified
+                // Workspace. Inspect them before create_dir_all so a link or
+                // reparse point cannot redirect initialization outside root.
+                ensure_no_symlink_components(root, Path::new(directory))?;
+            }
             fs::create_dir_all(root.join(directory))?;
         }
 
@@ -372,8 +378,7 @@ impl Workspace {
         // Build the final relative path only after each user-controlled token
         // has passed its narrower character policy.
         let relative = format!("Agent/artifacts/{run_id}/{artifact_id}.{extension}");
-        SafeRelativePath::parse(&relative)?;
-        let path = self.root().join(&relative);
+        let path = self.resolve_agent_path(&relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -387,10 +392,7 @@ impl Workspace {
     /// Persist one Agent turn checkpoint below a validated, fixed directory.
     pub fn write_agent_turn(&self, turn: &AgentTurn) -> Result<()> {
         turn.validate()?;
-        let path = self
-            .root()
-            .join("Agent/turns")
-            .join(format!("{}.json", turn.id));
+        let path = self.resolve_agent_path(&format!("Agent/turns/{}.json", turn.id))?;
         let bytes = serde_json::to_vec_pretty(turn)?;
         let _guard = self.inner.write_lock.lock();
         atomic_write(&path, &bytes)
@@ -405,7 +407,7 @@ impl Workspace {
         {
             return Err(WorkspaceError::InvalidPath("invalid Agent turn id".into()));
         }
-        let path = self.root().join("Agent/turns").join(format!("{id}.json"));
+        let path = self.resolve_agent_path(&format!("Agent/turns/{id}.json"))?;
         let turn: AgentTurn = serde_json::from_slice(&fs::read(path)?)?;
         turn.validate()?;
         Ok(turn)
@@ -413,17 +415,24 @@ impl Workspace {
 
     /// List durable Agent turns in stable update order.
     pub fn read_agent_turns(&self) -> Result<Vec<AgentTurn>> {
-        let directory = self.root().join("Agent/turns");
+        let directory = self.resolve_agent_path("Agent/turns")?;
         let mut turns = Vec::new();
         if !directory.is_dir() {
             return Ok(turns);
         }
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
+            let entry_path = entry.path();
+            let entry_relative = entry_path
+                .strip_prefix(self.root())
+                .map_err(|_| WorkspaceError::PathEscape(entry_path.display().to_string()))?;
+            // A guarded directory is not enough: an individual turn file can
+            // also be replaced by a link after the directory was created.
+            self.guard_agent_path(entry_relative)?;
+            if entry_path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let turn: AgentTurn = serde_json::from_slice(&fs::read(entry.path())?)?;
+            let turn: AgentTurn = serde_json::from_slice(&fs::read(entry_path)?)?;
             turn.validate()?;
             turns.push(turn);
         }
@@ -441,10 +450,7 @@ impl Workspace {
         {
             return Err(WorkspaceError::InvalidPath("invalid Agent run id".into()));
         }
-        let path = self
-            .root()
-            .join("Agent/runs")
-            .join(format!("{run_id}.jsonl"));
+        let path = self.resolve_agent_path(&format!("Agent/runs/{run_id}.jsonl"))?;
         if !path.is_file() {
             return Ok(Vec::new());
         }
@@ -471,10 +477,7 @@ impl Workspace {
                 "Agent event exceeds 512 KiB".into(),
             ));
         }
-        let path = self
-            .root()
-            .join("Agent/runs")
-            .join(format!("{run_id}.jsonl"));
+        let path = self.resolve_agent_path(&format!("Agent/runs/{run_id}.jsonl"))?;
         let _guard = self.inner.write_lock.lock();
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(line.as_bytes())?;
@@ -502,7 +505,7 @@ impl Workspace {
                 ));
             }
         };
-        let path = self.root().join(safe);
+        let path = self.resolve_agent_path(&safe)?;
         if !path.exists() {
             return Ok(serde_json::json!({}));
         }
@@ -528,15 +531,13 @@ impl Workspace {
         };
         // Create only the known parent directory, then serialize and replace
         // the file while holding the process-local write lock.
-        let path = self.root().join(&relative);
+        let path = self.resolve_agent_path(&relative)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         // Pretty output keeps memory inspectable while the atomic helper keeps
         // partial JSON from being published after a crash.
-        let bytes = serde_json::to_vec_pretty(value)?;
-        let _guard = self.inner.write_lock.lock();
-        atomic_write(&path, &bytes)
+        self.write_json_value(&relative, value)
     }
 
     /// Import one UTF-8 text source into `Documents` without overwriting an
@@ -683,6 +684,7 @@ impl Workspace {
     /// Perform a read-modify-write completion toggle while preserving all
     /// fields, including unknown task extras and envelope extras.
     pub fn set_task_completed(&self, id: Uuid, is_completed: bool) -> Result<()> {
+        let _guard = self.inner.write_lock.lock();
         let mut tasks = self.read_tasks()?;
         let task = tasks.iter_mut().find(|task| task.id == id).ok_or_else(|| {
             WorkspaceError::MalformedData {
@@ -691,7 +693,7 @@ impl Workspace {
             }
         })?;
         task.is_completed = is_completed;
-        self.upsert_task(task.clone())
+        self.upsert_jsonl_record_locked("Data/tasks.jsonl", task.clone(), |value| value.id)
     }
 
     /// Read the one JSON-array domain; unlike JSONL, the array has no envelope
@@ -708,16 +710,18 @@ impl Workspace {
     pub fn upsert_subject(&self, subject: Subject) -> Result<()> {
         // Array domains use a read-modify-write because their wire format has no
         // independent line envelope to update in place.
+        let _guard = self.inner.write_lock.lock();
         let mut values = self.read_subjects()?;
         upsert_value(&mut values, subject, |value| value.id);
-        self.write_json_value("Data/subjects.json", &values)
+        self.write_json_value_locked("Data/subjects.json", &values)
     }
 
     pub fn delete_subject(&self, id: Uuid) -> Result<()> {
         // Removing an unknown UUID is intentionally idempotent.
+        let _guard = self.inner.write_lock.lock();
         let mut values = self.read_subjects()?;
         values.retain(|value| value.id != id);
-        self.write_json_value("Data/subjects.json", &values)
+        self.write_json_value_locked("Data/subjects.json", &values)
     }
 
     /// Phase records use the generic JSONL envelope path.
@@ -1057,43 +1061,49 @@ impl Workspace {
 
     pub fn upsert_coach_goal(&self, value: CoachGoal) -> Result<()> {
         value.validate()?;
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         upsert_value(&mut data.goals, value, |value| value.id);
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     pub fn upsert_coach_analysis(&self, value: CoachAnalysis) -> Result<()> {
         // Analyses are validated as part of the aggregate read/write contract.
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         upsert_value(&mut data.analyses, value, |value| value.id);
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     pub fn upsert_coach_proposal(&self, value: CoachProposal) -> Result<()> {
         // Proposal replacement keeps its current row extras via the aggregate
         // writer, just like the other Coach kinds.
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         upsert_value(&mut data.proposals, value, |value| value.id);
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     pub fn upsert_coach_chat(&self, value: CoachChat) -> Result<()> {
         // Chat metadata is stored in the same heterogeneous file as messages.
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         upsert_value(&mut data.chats, value, |value| value.id);
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     pub fn upsert_coach_message(&self, value: CoachConversationMessage) -> Result<()> {
         // Message IDs remain independent so conversation history can be merged.
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         upsert_value(&mut data.messages, value, |value| value.id);
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     /// Delete a goal and the analyses, proposals, chats, and messages that
     /// would otherwise retain dangling references to it.
     pub fn delete_coach_goal(&self, id: Uuid) -> Result<()> {
+        let _guard = self.inner.write_lock.lock();
         let mut data = self.read_coach_data()?;
         data.goals.retain(|value| value.id != id);
         data.analyses.retain(|value| value.goal_id != id);
@@ -1107,13 +1117,21 @@ impl Workspace {
         data.chats.retain(|value| value.goal_id != Some(id));
         data.messages
             .retain(|value| !chat_ids.contains(&value.chat_id));
-        self.write_coach_data(&data)
+        self.write_coach_data_locked(&data)
     }
 
     /// Re-encode typed Coach collections into the iOS-compatible Base64 row
     /// format, restoring row extras and appending unknown rows unchanged.
     pub fn write_coach_data(&self, data: &CoachData) -> Result<()> {
         data.validate()?;
+        let _guard = self.inner.write_lock.lock();
+        self.write_coach_data_locked(data)
+    }
+
+    /// Serialize and publish Coach data while the caller already holds the
+    /// Workspace write lock. This keeps aggregate read-modify-write operations
+    /// from dropping updates between their read and the final rename.
+    fn write_coach_data_locked(&self, data: &CoachData) -> Result<()> {
         let mut rows = Vec::new();
         for (kind, value) in [
             ("goal", serde_json::to_value(&data.goals)?),
@@ -1187,7 +1205,6 @@ impl Workspace {
         }
         // Coach data is one JSONL file, so serialize the complete replacement
         // while holding the same lock used by every other persistence domain.
-        let _guard = self.inner.write_lock.lock();
         atomic_write(&self.root().join("Data/coach_data.jsonl"), &bytes)
     }
 
@@ -1300,9 +1317,19 @@ impl Workspace {
         relative: &str,
         id: Uuid,
     ) -> Result<()> {
+        let _guard = self.inner.write_lock.lock();
+        self.delete_jsonl_record_locked::<T>(relative, id)
+    }
+
+    /// Remove one JSONL envelope while the caller already holds the write lock.
+    fn delete_jsonl_record_locked<T: DeserializeOwned + Serialize>(
+        &self,
+        relative: &str,
+        id: Uuid,
+    ) -> Result<()> {
         let mut records: Vec<IosRecord<T>> = self.read_jsonl_envelopes(relative)?;
         records.retain(|record| record.id != id);
-        self.write_jsonl_records(relative, &records)
+        self.write_jsonl_records_locked(relative, &records)
     }
 
     /// Resolve a media-relative path while retaining the `Media/` prefix in the
@@ -1443,10 +1470,15 @@ impl Workspace {
         Ok(records)
     }
 
-    /// Serialize complete JSONL replacement content and publish it atomically.
-    /// Callers do not write individual lines because a crash midway would leave
-    /// a syntactically valid prefix with lost records.
-    fn write_jsonl_records<T: Serialize>(&self, relative: &str, records: &[T]) -> Result<()> {
+    /// Serialize and publish complete JSONL replacement content while the
+    /// caller already holds the write lock. Callers do not write individual
+    /// lines because a crash midway would leave a syntactically valid prefix
+    /// with lost records.
+    fn write_jsonl_records_locked<T: Serialize>(
+        &self,
+        relative: &str,
+        records: &[T],
+    ) -> Result<()> {
         let mut bytes = Vec::new();
         for record in records {
             // One newline per envelope keeps the file streamable and matches
@@ -1455,7 +1487,6 @@ impl Workspace {
             bytes.push(b'\n');
         }
         // Serialize with all other writes before the temp-file/rename sequence.
-        let _guard = self.inner.write_lock.lock();
         atomic_write(&self.root().join(relative), &bytes)
     }
 
@@ -1463,6 +1494,16 @@ impl Workspace {
     /// The updatedAt timestamp is generated in UTC with millisecond precision,
     /// matching the desktop/iOS interchange contract.
     fn upsert_jsonl_record<T, F>(&self, relative: &str, value: T, id: F) -> Result<()>
+    where
+        T: Clone + DeserializeOwned + Serialize,
+        F: Fn(&T) -> Uuid,
+    {
+        let _guard = self.inner.write_lock.lock();
+        self.upsert_jsonl_record_locked(relative, value, id)
+    }
+
+    /// Replace one JSONL record while the caller already holds the write lock.
+    fn upsert_jsonl_record_locked<T, F>(&self, relative: &str, value: T, id: F) -> Result<()>
     where
         T: Clone + DeserializeOwned + Serialize,
         F: Fn(&T) -> Uuid,
@@ -1491,23 +1532,29 @@ impl Workspace {
         } else {
             records.push(envelope);
         }
-        self.write_jsonl_records(relative, &records)
+        self.write_jsonl_records_locked(relative, &records)
     }
 
     /// Write a pretty JSON singleton/array through the same lock and atomic
     /// replacement used by JSONL domains.
     fn write_json_value<T: Serialize>(&self, relative: &str, value: &T) -> Result<()> {
+        let _guard = self.inner.write_lock.lock();
+        self.write_json_value_locked(relative, value)
+    }
+
+    /// Serialize and publish a JSON value while the caller already holds the
+    /// write lock.
+    fn write_json_value_locked<T: Serialize>(&self, relative: &str, value: &T) -> Result<()> {
         // Pretty JSON is used for array/singleton files to remain inspectable;
         // atomic replacement still provides the crash-safety boundary.
         let bytes = serde_json::to_vec_pretty(value)?;
-        let _guard = self.inner.write_lock.lock();
         atomic_write(&self.root().join(relative), &bytes)
     }
 
     /// Read and validate Notebook index data, returning an empty list when the
     /// optional index file has not been created by an older Workspace.
     pub fn read_agent_notebooks(&self) -> Result<Vec<AgentNotebook>> {
-        let path = self.root().join("Agent/notebooks.json");
+        let path = self.resolve_agent_path("Agent/notebooks.json")?;
         if !path.exists() {
             // The index is optional for workspaces that have not used Agent yet.
             return Ok(Vec::new());
@@ -1539,7 +1586,30 @@ impl Workspace {
         }
         let bytes = serde_json::to_vec_pretty(&notebooks)?;
         let _guard = self.inner.write_lock.lock();
-        atomic_write(&self.root().join("Agent/notebooks.json"), &bytes)
+        let path = self.resolve_agent_path("Agent/notebooks.json")?;
+        atomic_write(&path, &bytes)
+    }
+
+    /// Resolve a path from one of the fixed Agent layouts after validating its
+    /// wire spelling and every existing filesystem component. The prefix check
+    /// keeps this helper from becoming a generic root join that callers could
+    /// accidentally use for another storage namespace.
+    fn resolve_agent_path(&self, relative: &str) -> Result<PathBuf> {
+        let safe = SafeRelativePath::parse(relative)?;
+        self.guard_agent_path(safe.as_path())?;
+        Ok(self.root().join(safe.as_path()))
+    }
+
+    /// Apply the filesystem-level guard to an Agent-relative path. This is
+    /// separate from `resolve_agent_path` so directory enumeration can inspect
+    /// paths obtained from `read_dir` without reconstructing wire strings.
+    fn guard_agent_path(&self, relative: &Path) -> Result<()> {
+        if !relative.starts_with(Path::new("Agent")) {
+            return Err(WorkspaceError::InvalidPath(
+                "Agent path must be below Agent".into(),
+            ));
+        }
+        ensure_no_symlink_components(self.root(), relative)
     }
 
     /// Borrow the write mutex for multi-file transactions such as backup restore.
@@ -1743,6 +1813,84 @@ mod tests {
     }
 
     #[test]
+    // Every worker starts its read-modify-write at the same barrier. If the
+    // lock only covered the final rename, concurrent workers would commonly
+    // publish snapshots that omit records written by another worker.
+    fn concurrent_collection_upserts_preserve_all_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Arc::new(Workspace::create(temp.path().join("Study")).unwrap());
+        let worker_count = 24;
+        let barrier = Arc::new(std::sync::Barrier::new(worker_count));
+        let mut handles = Vec::new();
+
+        for index in 0..worker_count {
+            let workspace = Arc::clone(&workspace);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let subject = Subject {
+                    id: Uuid::new_v4(),
+                    name: format!("Subject {index}"),
+                    enabled: true,
+                    full_score: 100.0,
+                    display_name: format!("Subject {index}"),
+                    extra: BTreeMap::new(),
+                };
+                barrier.wait();
+                workspace.upsert_subject(subject).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert_eq!(workspace.read_subjects().unwrap().len(), worker_count);
+
+        let barrier = Arc::new(std::sync::Barrier::new(worker_count));
+        let mut handles = Vec::new();
+        for index in 0..worker_count {
+            let workspace = Arc::clone(&workspace);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let value = AiFeatureRecord {
+                    id: Uuid::new_v4(),
+                    created_at: "2026-08-01T00:00:00Z".into(),
+                    updated_at: "2026-08-01T00:00:00Z".into(),
+                    status: format!("draft-{index}"),
+                    payload: serde_json::json!({"index": index}),
+                    applied_actions: BTreeMap::new(),
+                    extra: BTreeMap::new(),
+                };
+                barrier.wait();
+                workspace.upsert_study_suggestion(value).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let suggestion_ids: Vec<_> = workspace
+            .read_study_suggestions()
+            .unwrap()
+            .into_iter()
+            .map(|value| value.id)
+            .collect();
+        assert_eq!(suggestion_ids.len(), worker_count);
+
+        let barrier = Arc::new(std::sync::Barrier::new(worker_count));
+        let mut handles = Vec::new();
+        for id in suggestion_ids {
+            let workspace = Arc::clone(&workspace);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                workspace.delete_study_suggestion(id).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        assert!(workspace.read_study_suggestions().unwrap().is_empty());
+    }
+
+    #[test]
     fn phase3_optional_collections_round_trip_without_changing_schema() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = Workspace::create(temp.path().join("Study")).unwrap();
@@ -1801,6 +1949,106 @@ mod tests {
         let workspace = Workspace::create(temp.path().join("Study")).unwrap();
         symlink(outside.path(), workspace.root().join("Documents/outside")).unwrap();
         assert!(workspace.resolve_existing("Documents/outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // Every fixed Agent directory and file must reject a symlink before any
+    // read, append, create, or atomic replacement can follow it outside root.
+    fn agent_fixed_paths_reject_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let turn = AgentTurn {
+            id: "turn-1".into(),
+            mode: "deep_research".into(),
+            notebook_id: None,
+            config_json: None,
+            goal: "Find the evidence".into(),
+            source_paths: Vec::new(),
+            allow_tools: true,
+            read_only: true,
+            history_json: "[]".into(),
+            status: "recoverable".into(),
+            stage: Some("researching".into()),
+            loop_index: 2,
+            last_sequence: 9,
+            result_json: None,
+            error: None,
+            checkpoint: "safe".into(),
+            resume_safe: true,
+            created_at: "2026-07-31T08:00:00Z".into(),
+            updated_at: "2026-07-31T08:01:00Z".into(),
+        };
+
+        let turns = workspace.root().join("Agent/turns");
+        fs::remove_dir(&turns).unwrap();
+        symlink(outside.path(), &turns).unwrap();
+        assert!(workspace.write_agent_turn(&turn).is_err());
+        assert!(workspace.read_agent_turn(&turn.id).is_err());
+        assert!(workspace.read_agent_turns().is_err());
+
+        let runs = workspace.root().join("Agent/runs");
+        fs::remove_dir(&runs).unwrap();
+        symlink(outside.path(), &runs).unwrap();
+        assert!(workspace.read_agent_run_log("run-1").is_err());
+        assert!(workspace.append_agent_run_log("run-1", "{} ").is_err());
+
+        let memory = workspace.root().join("Agent/memory");
+        fs::remove_dir(&memory).unwrap();
+        symlink(outside.path(), &memory).unwrap();
+        assert!(workspace.read_agent_memory("workspace").is_err());
+        assert!(
+            workspace
+                .write_agent_memory("workspace", &serde_json::json!({"safe": false}))
+                .is_err()
+        );
+
+        let notebooks = workspace.root().join("Agent/notebooks");
+        fs::remove_dir(&notebooks).unwrap();
+        symlink(outside.path(), &notebooks).unwrap();
+        assert!(workspace.read_agent_memory("notebook-1").is_err());
+        assert!(
+            workspace
+                .write_agent_memory("notebook-1", &serde_json::json!({"safe": false}))
+                .is_err()
+        );
+
+        let artifacts = workspace.root().join("Agent/artifacts");
+        fs::remove_dir(&artifacts).unwrap();
+        symlink(outside.path(), &artifacts).unwrap();
+        assert!(
+            workspace
+                .write_agent_artifact("run-1", "artifact-1", "json", b"{}")
+                .is_err()
+        );
+
+        let notebook_index = workspace.root().join("Agent/notebooks.json");
+        fs::write(outside.path().join("notebooks.json"), b"[]").unwrap();
+        symlink(outside.path().join("notebooks.json"), &notebook_index).unwrap();
+        assert!(workspace.read_agent_notebooks().is_err());
+        assert!(workspace.write_agent_notebooks(Vec::new()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    // Turn enumeration must guard each child as well as its containing
+    // directory, because a later replacement can target only one checkpoint.
+    fn agent_turn_listing_rejects_symbolic_linked_entry() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        symlink(
+            outside.path().join("turn.json"),
+            workspace.root().join("Agent/turns/turn.json"),
+        )
+        .unwrap();
+
+        assert!(workspace.read_agent_turns().is_err());
     }
 
     #[test]

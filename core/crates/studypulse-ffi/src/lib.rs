@@ -666,6 +666,7 @@ pub struct BackupExportResultDto {
 // state and cannot be serialized as a meaningful user timestamp; the facade
 // converts it to elapsed seconds only when a snapshot is requested.
 struct ActiveTimer {
+    workspace_id: String,
     session_id: uuid::Uuid,
     started_at: String,
     running_since: Option<std::time::Instant>,
@@ -954,8 +955,9 @@ pub struct OperationEventDto {
 
 // StudyPulseCore owns the process boundary visible to Swift.  Workspace and
 // provider selection are mutually coordinated here, while Agent/timer/backup
-// controls remain in memory and are reset when their owning Workspace or model
-// changes.
+// controls remain in memory.  Timers are bound to the active Workspace, and
+// lifecycle-changing operations reject an active timer instead of migrating
+// or silently discarding it.
 #[derive(uniffi::Object)]
 pub struct StudyPulseCore {
     workspace: Mutex<Option<Workspace>>,
@@ -1013,9 +1015,10 @@ impl StudyPulseCore {
         // could still be using the previous store.  Installing the new handle
         // also rebuilds the runtime against the current model, if any.
         self.ensure_no_active_run()?;
+        self.ensure_no_active_timer()?;
         let workspace = Workspace::create(path).map_err(CoreError::message)?;
         let dto = workspace.info().into();
-        self.install_workspace(workspace);
+        self.install_workspace(workspace)?;
         Ok(dto)
     }
 
@@ -1023,9 +1026,10 @@ impl StudyPulseCore {
         // `open` validates existing metadata without recreating the directory;
         // the facade only publishes its info after the Workspace accepts it.
         self.ensure_no_active_run()?;
+        self.ensure_no_active_timer()?;
         let workspace = Workspace::open(path).map_err(CoreError::message)?;
         let dto = workspace.info().into();
-        self.install_workspace(workspace);
+        self.install_workspace(workspace)?;
         Ok(dto)
     }
 
@@ -1050,11 +1054,21 @@ impl StudyPulseCore {
                 "cannot close Workspace while Agent is running",
             ));
         }
+        let mut active_timer = self.active_timer.lock();
+        if active_timer.is_some() {
+            return Err(CoreError::message(
+                "cannot close Workspace while a timer is active",
+            ));
+        }
         *self.runtime.lock() = None;
         *self.workspace.lock() = None;
         *self.last_run_id.lock() = None;
         self.inspections.lock().clear();
         self.clear_ai_state();
+        // Keep the lifecycle reset explicit even though the check above means
+        // this is currently always None.  The lock also prevents a timer from
+        // starting between the check and Workspace removal.
+        *active_timer = None;
         Ok(())
     }
 
@@ -1093,6 +1107,7 @@ impl StudyPulseCore {
         // selects the first available model, and replaces any BYOK client.  The
         // API token remains inside CloudModelClient/secure host storage.
         self.ensure_no_active_run()?;
+        self.ensure_no_active_timer()?;
         if !refresh_token.starts_with("sp_refresh_") {
             return Err(CoreError::message("Cloud AI refresh token is invalid"));
         }
@@ -1105,13 +1120,12 @@ impl StudyPulseCore {
             .map_err(CoreError::message)?;
         let account: CloudAccountDto = profile.into();
         let model: Arc<dyn ModelClient> = Arc::new(client.clone());
+        self.rebuild_runtime(Arc::clone(&model))?;
         *self.model.lock() = Some(Arc::clone(&model));
         *self.cloud_client.lock() = Some(client);
         *self.cloud_account.lock() = Some(account.clone());
         *self.byok_client.lock() = None;
         *self.byok_config.lock() = None;
-        self.clear_ai_state();
-        self.rebuild_runtime(model);
         Ok(account)
     }
 
@@ -1125,17 +1139,17 @@ impl StudyPulseCore {
         // model.  The API key is consumed by the provider client and never enters
         // the returned configuration DTO.
         self.ensure_no_active_run()?;
+        self.ensure_no_active_timer()?;
         let client = OpenAICompatibleModelClient::new(&base_url, api_key, model)
             .map_err(CoreError::message)?;
         let config = ByokConfigDto::from(client.config());
         let model: Arc<dyn ModelClient> = Arc::new(client.clone());
+        self.rebuild_runtime(Arc::clone(&model))?;
         *self.model.lock() = Some(Arc::clone(&model));
         *self.cloud_client.lock() = None;
         *self.cloud_account.lock() = None;
         *self.byok_client.lock() = Some(client);
         *self.byok_config.lock() = Some(config.clone());
-        self.clear_ai_state();
-        self.rebuild_runtime(model);
         Ok(config)
     }
 
@@ -2683,14 +2697,19 @@ impl StudyPulseCore {
         // session.  A running Agent is rejected to keep the shared runtime from
         // mixing background work with timer ownership.
         self.ensure_no_active_run()?;
-        if target_duration_seconds < 0 {
-            return Err(CoreError::message("timer duration cannot be negative"));
-        }
         let mut timer = self.active_timer.lock();
         if timer.is_some() {
             return Err(CoreError::message("a timer is already active"));
         }
+        // Take the timer lock before reading Workspace so lifecycle changes
+        // cannot remove/swap the Workspace between validation and ownership.
+        let workspace = self.workspace()?;
+        let workspace_id = workspace.info().id;
+        if target_duration_seconds < 0 {
+            return Err(CoreError::message("timer duration cannot be negative"));
+        }
         let value = ActiveTimer {
+            workspace_id,
             session_id: uuid::Uuid::new_v4(),
             started_at: chrono::Utc::now().to_rfc3339(),
             running_since: Some(std::time::Instant::now()),
@@ -2712,6 +2731,8 @@ impl StudyPulseCore {
         let value = timer
             .as_mut()
             .ok_or_else(|| CoreError::message("no active timer"))?;
+        let workspace = self.workspace()?;
+        ensure_timer_workspace(value, &workspace)?;
         if let Some(running_since) = value.running_since.take() {
             value.elapsed_before_pause += running_since.elapsed().as_secs() as i64;
         }
@@ -2725,6 +2746,8 @@ impl StudyPulseCore {
         let value = timer
             .as_mut()
             .ok_or_else(|| CoreError::message("no active timer"))?;
+        let workspace = self.workspace()?;
+        ensure_timer_workspace(value, &workspace)?;
         if value.running_since.is_none() {
             value.running_since = Some(std::time::Instant::now());
         }
@@ -2732,30 +2755,37 @@ impl StudyPulseCore {
     }
 
     pub fn finish_timer(&self) -> Result<StudySessionDto, CoreError> {
-        // Finish consumes the in-process timer exactly once, converts elapsed
-        // time to a StudySession, and then performs the sole timer persistence
-        // write.  The returned DTO is the stored session projection.
+        // Hold the timer while resolving the Workspace so a lifecycle change
+        // cannot redirect this session.  The timer is only removed after the
+        // Workspace write succeeds; failed persistence remains safely retryable.
         let mut timer = self.active_timer.lock();
         let value = timer
-            .take()
+            .as_ref()
             .ok_or_else(|| CoreError::message("no active timer"))?;
-        let elapsed = elapsed_seconds(&value);
+        let workspace = self.workspace()?;
+        ensure_timer_workspace(value, &workspace)?;
+        let elapsed = elapsed_seconds(value);
         let session = StudySession {
             id: value.session_id,
-            start_date: value.started_at,
+            start_date: value.started_at.clone(),
             duration_seconds: elapsed,
             intensity: value.intensity.into(),
             completed: true,
             heart_rate_samples: None,
             difficulty_annotations: None,
-            investment_target: value.investment_target.map(TryInto::try_into).transpose()?,
+            investment_target: value
+                .investment_target
+                .clone()
+                .map(TryInto::try_into)
+                .transpose()?,
             source: StudySessionSource::Timer,
             time_zone_identifier: Some("UTC".into()),
             extra: BTreeMap::new(),
         };
-        self.workspace()?
+        workspace
             .upsert_study_session(session.clone())
             .map_err(CoreError::message)?;
+        timer.take();
         Ok(session.into())
     }
 
@@ -3246,10 +3276,16 @@ impl StudyPulseCore {
         Ok(request)
     }
 
-    fn install_workspace(&self, workspace: Workspace) {
+    fn install_workspace(&self, workspace: Workspace) -> Result<(), CoreError> {
         // Installing a Workspace resets run/inspection identity and rebuilds the
-        // Agent against the currently selected model.  It never migrates a
-        // process-local timer or backup session across Workspace roots.
+        // Agent against the currently selected model.  An active timer blocks
+        // the transition so it cannot be migrated across Workspace roots.
+        let mut active_timer = self.active_timer.lock();
+        if active_timer.is_some() {
+            return Err(CoreError::message(
+                "cannot switch Workspace while a timer is active",
+            ));
+        }
         *self.workspace.lock() = Some(workspace);
         let model = self.model.lock().clone();
         *self.runtime.lock() = model.map(|model| {
@@ -3265,15 +3301,28 @@ impl StudyPulseCore {
         *self.last_run_id.lock() = None;
         self.inspections.lock().clear();
         self.clear_ai_state();
+        // Keep the timer state explicitly scoped to this lifecycle boundary.
+        *active_timer = None;
+        Ok(())
     }
 
-    fn rebuild_runtime(&self, model: Arc<dyn ModelClient>) {
+    fn rebuild_runtime(&self, model: Arc<dyn ModelClient>) -> Result<(), CoreError> {
         // Provider switching replaces the runtime so no future Agent call can
-        // retain the old client's credentials or protocol implementation.
+        // retain the old client's credentials or protocol implementation.  The
+        // timer is Workspace-scoped, so changing the model is rejected while a
+        // timer is active instead of silently losing it.
+        let active_timer = self.active_timer.lock();
+        if active_timer.is_some() {
+            return Err(CoreError::message(
+                "cannot rebuild runtime while a timer is active",
+            ));
+        }
         let workspace = self.workspace.lock().clone();
         *self.runtime.lock() = workspace.map(|workspace| AgentRuntime::new(workspace, model));
         *self.last_run_id.lock() = None;
         self.clear_ai_state();
+        drop(active_timer);
+        Ok(())
     }
 
     fn clear_ai_state(&self) {
@@ -3288,6 +3337,15 @@ impl StudyPulseCore {
             .as_ref()
             .cloned()
             .ok_or_else(|| CoreError::message("no Workspace is open"))
+    }
+
+    fn ensure_no_active_timer(&self) -> Result<(), CoreError> {
+        if self.active_timer.lock().is_some() {
+            return Err(CoreError::message(
+                "an active timer blocks this lifecycle change",
+            ));
+        }
+        Ok(())
     }
 
     fn runtime(&self) -> Result<Arc<AgentRuntime>, CoreError> {
@@ -4776,6 +4834,15 @@ fn elapsed_seconds(timer: &ActiveTimer) -> i64 {
             .unwrap_or(0)
 }
 
+fn ensure_timer_workspace(timer: &ActiveTimer, workspace: &Workspace) -> Result<(), CoreError> {
+    if timer.workspace_id != workspace.info().id {
+        return Err(CoreError::message(
+            "active timer belongs to a different Workspace",
+        ));
+    }
+    Ok(())
+}
+
 fn timer_snapshot(timer: &ActiveTimer) -> TimerSnapshotDto {
     // A timer snapshot is derived state.  Only lifecycle commands mutate the
     // hidden timer, so a DTO read cannot extend or finish a session.
@@ -5243,6 +5310,100 @@ mod tests {
     // DTO conversion, Agent event/cursor behavior, SRS round trips, and the
     // guarantee that process-local state does not masquerade as persistence.
     use super::*;
+
+    #[test]
+    fn timer_requires_workspace_and_retains_state_when_persistence_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = StudyPulseCore::new();
+
+        assert!(
+            core.start_timer(SessionIntensityDto::Steady, 60, None)
+                .is_err()
+        );
+        assert!(matches!(
+            core.active_timer().status,
+            TimerStatusKindDto::Idle
+        ));
+
+        let workspace_path = temp.path().join("Workspace");
+        core.create_workspace(workspace_path.to_string_lossy().into_owned())
+            .unwrap();
+        let started = core
+            .start_timer(SessionIntensityDto::Steady, 60, None)
+            .unwrap();
+
+        let sessions_path = workspace_path.join("Data/study_sessions.jsonl");
+        std::fs::remove_file(&sessions_path).unwrap();
+        std::fs::create_dir(&sessions_path).unwrap();
+        assert!(core.finish_timer().is_err());
+
+        let after_failure = core.active_timer();
+        assert!(matches!(after_failure.status, TimerStatusKindDto::Running));
+        assert_eq!(after_failure.session_id, started.session_id);
+
+        std::fs::remove_dir(&sessions_path).unwrap();
+        std::fs::File::create(&sessions_path).unwrap();
+        let finished = core.finish_timer().unwrap();
+        assert_eq!(finished.id, started.session_id.unwrap());
+        assert!(matches!(
+            core.active_timer().status,
+            TimerStatusKindDto::Idle
+        ));
+        assert_eq!(core.get_study_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn timer_blocks_workspace_lifecycle_changes_and_checks_workspace_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_path = temp.path().join("First");
+        let second_path = temp.path().join("Second");
+        let core = StudyPulseCore::new();
+        core.create_workspace(first_path.to_string_lossy().into_owned())
+            .unwrap();
+        Workspace::create(&second_path).unwrap();
+
+        let started = core
+            .start_timer(SessionIntensityDto::DeepFocus, 60, None)
+            .unwrap();
+        assert!(
+            core.open_workspace(second_path.to_string_lossy().into_owned())
+                .is_err()
+        );
+        assert!(core.close_workspace().is_err());
+        assert!(
+            core.rebuild_runtime(Arc::new(studypulse_model_client::MockModelClient))
+                .is_err()
+        );
+        assert_eq!(core.active_timer().session_id, started.session_id);
+
+        let first_workspace = core.workspace.lock().clone().unwrap();
+        *core.workspace.lock() = None;
+        assert!(core.finish_timer().is_err());
+        assert_eq!(core.active_timer().session_id, started.session_id);
+        *core.workspace.lock() = Some(first_workspace.clone());
+
+        // Simulate an accidental internal Workspace replacement. The identity
+        // check must still prevent the old timer from being written elsewhere,
+        // and the timer must remain available for recovery.
+        let second_workspace = Workspace::open(&second_path).unwrap();
+        *core.workspace.lock() = Some(second_workspace.clone());
+        assert!(core.finish_timer().is_err());
+        assert_eq!(second_workspace.read_study_sessions().unwrap().len(), 0);
+        assert_eq!(core.active_timer().session_id, started.session_id);
+        *core.workspace.lock() = Some(first_workspace);
+
+        core.cancel_timer().unwrap();
+        core.open_workspace(second_path.to_string_lossy().into_owned())
+            .unwrap();
+        assert!(matches!(
+            core.active_timer().status,
+            TimerStatusKindDto::Idle
+        ));
+        assert!(
+            core.start_timer(SessionIntensityDto::Light, 60, None)
+                .is_ok()
+        );
+    }
 
     #[test]
     fn ffi_facade_runs_mock_agent() {
