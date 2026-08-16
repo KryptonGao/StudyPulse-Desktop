@@ -72,6 +72,8 @@ flowchart LR
 - `src-tauri/`：Tauri 应用宿主、文件选择器、深链回调、系统凭据存取和前端命令边界。
 - `core/`：Rust workspace，包含 Workspace 存储、Agent runtime、工具注册表、模型客户端、备份和 Runner。
 
+Rust Core 是唯一能读写 Workspace 与凭据的层，其他层均通过它访问数据。
+
 生产桌面应用不依赖 Electron，也不对外提供浏览器 localhost 服务。开发时的 `npm run dev` 只是 Vite 前端预览，不能代替 Tauri 应用运行。
 
 ## 环境要求
