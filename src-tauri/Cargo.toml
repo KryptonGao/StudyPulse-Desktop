@@ -1,6 +1,6 @@
 [package]
 name = "studypulse-client"
-version = "0.10.1"
+version = "0.11.0"
 description = "Local-first StudyPulse desktop client"
 authors = ["StudyPulse"]
 edition = "2024"
@@ -24,12 +24,17 @@ keyring = "4.1.6"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 studypulse-ffi = { path = "../core/crates/studypulse-ffi" }
-tauri = { version = "2.11.5", features = [] }
+# Transparent Overlay title bars on macOS require Tauri's private AppKit API.
+tauri = { version = "2.11.5", features = ["macos-private-api"] }
 tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2.5.4"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The AppKit visual-effect view is only installed by the macOS setup hook.
+window-vibrancy = "0.6.0"
 
 [dev-dependencies]
 tempfile = "3.23.0"
