@@ -1269,30 +1269,11 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // AppState is managed once for the process; commands receive a typed
+        // State handle and never construct independent Core instances.
         .setup(|app| {
-            let state = AppState::new(app.handle())?;
+            let state = AppState::new(app.handle()).map_err(|error| error.to_string())?;
             app.manage(state);
-
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{NSVisualEffectMaterial, apply_vibrancy};
-
-                let window = app.get_webview_window("main").ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "StudyPulse main window was not created before vibrancy setup",
-                    )
-                })?;
-
-                apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None).map_err(
-                    |error| {
-                        std::io::Error::other(format!(
-                            "StudyPulse macOS vibrancy setup failed: {error}"
-                        ))
-                    },
-                )?;
-            }
-
             Ok(())
         })
         // Every frontend-visible command must appear in this generated list.
