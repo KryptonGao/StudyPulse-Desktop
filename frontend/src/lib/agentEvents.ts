@@ -12,6 +12,11 @@ function parsePayload(payloadJson: string | null): unknown {
   }
 }
 
+export interface AgentInputRequest {
+  prompt: string;
+  options: string[];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   // This narrow guard lets callers read dynamic JSON fields without treating
   // arrays as request objects.
@@ -32,6 +37,50 @@ function wasDenied(event: AgentEvent): boolean {
   const payload = parsePayload(event.payload_json);
   if (!isRecord(payload) || !isRecord(payload.error)) return false;
   return payload.error.code === "user_denied";
+}
+
+function inputRequestFromPayload(payloadJson: string | null): AgentInputRequest | null {
+  let payload = parsePayload(payloadJson);
+  // Older hosts can serialize the tool arguments one level deeper. Accepting
+  // both forms keeps the UI compatible with persisted Agent event logs.
+  if (typeof payload === "string") payload = parsePayload(payload);
+  if (!isRecord(payload)) return null;
+
+  const promptCandidate = payload.prompt ?? payload.question ?? payload.message;
+  const prompt = typeof promptCandidate === "string" ? promptCandidate.trim() : "";
+  const options = Array.isArray(payload.options)
+    ? Array.from(
+        new Set(
+          payload.options
+            .filter((option): option is string => typeof option === "string")
+            .map((option) => option.trim())
+            .filter(Boolean)
+        )
+      )
+    : [];
+
+  if (!prompt && !options.length) return null;
+  return { prompt, options };
+}
+
+export function parseAgentInputRequest(event: AgentEvent | undefined): AgentInputRequest {
+  if (!event) return { prompt: "", options: [] };
+
+  let prompt = "";
+  let options: string[] = [];
+  for (const payloadJson of [event.payload_json, event.preview]) {
+    const request = inputRequestFromPayload(payloadJson);
+    if (!request) continue;
+    prompt ||= request.prompt;
+    if (!options.length) options = request.options;
+    if (prompt && options.length) break;
+  }
+
+  // `preview` was a plain prompt before ask_user gained structured options.
+  // Keep that legacy form readable while never falling back to raw JSON when
+  // a structured payload was successfully decoded from the other field.
+  if (!prompt && !options.length && event.preview) prompt = event.preview.trim();
+  return { prompt, options };
 }
 
 export function pythonCodeForConfirmation(event: AgentEvent | undefined): string | null {

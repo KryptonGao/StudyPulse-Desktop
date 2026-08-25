@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { core } from "../lib/core";
 import { useI18n } from "../i18n";
+import { useToast } from "../components/Toast";
 import type { AppSnapshot, ComprehensiveExam, Exam, Phase3Record } from "../types";
 
 type Provider = AppSnapshot["provider"] | undefined;
@@ -33,12 +34,20 @@ function DraftActions({ kind, value, onChanged }: { kind: "suggestions" | "daily
 
 export function TodayAiPanel({ provider }: { provider: Provider }) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const client = useQueryClient();
   const home = useQuery({ queryKey: ["phase3", "homeAsk"], queryFn: () => core.phase3Records("homeAsk") });
   const suggestions = useQuery({ queryKey: ["phase3", "suggestions"], queryFn: () => core.phase3Records("suggestions") });
   const plans = useQuery({ queryKey: ["phase3", "dailyPlans"], queryFn: () => core.phase3Records("dailyPlans") });
   const [question, setQuestion] = useState(""); const [busy, setBusy] = useState(false);
-  const refresh = () => void Promise.all([client.invalidateQueries({ queryKey: ["phase3", "homeAsk"] }), client.invalidateQueries({ queryKey: ["phase3", "suggestions"] }), client.invalidateQueries({ queryKey: ["phase3", "dailyPlans"] }), client.invalidateQueries({ queryKey: ["tasks"] })]);
+  const refresh = () => {
+    void Promise.all([
+      client.invalidateQueries({ queryKey: ["phase3", "homeAsk"] }),
+      client.invalidateQueries({ queryKey: ["phase3", "suggestions"] }),
+      client.invalidateQueries({ queryKey: ["phase3", "dailyPlans"] }),
+      client.invalidateQueries({ queryKey: ["tasks"] }),
+    ]).catch((error) => showToast(message(error), "error"));
+  };
   const latestHome = useMemo(() => home.data?.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0], [home.data]);
   const latestSuggestions = useMemo(() => suggestions.data?.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0], [suggestions.data]);
   const latestPlan = useMemo(() => plans.data?.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0], [plans.data]);
@@ -66,11 +75,18 @@ export function TodayAiPanel({ provider }: { provider: Provider }) {
 function DraftList({ value }: { value: Phase3Record }) { const items = asItems(value.payload); return <div className="compact-list phase3-list">{items.map((item) => <div className="compact-row" key={item.id}><div><strong>{item.title}</strong><span>{item.reason}{item.minutes ? ` · ${item.minutes} min` : ""}</span></div><span className="priority priority-3">{item.priority ?? 3}</span></div>)}</div>; }
 
 export function ExamAiPanel({ provider, exams, comprehensiveExams }: { provider: Provider; exams: Exam[]; comprehensiveExams: ComprehensiveExam[] }) {
-  const { t } = useI18n(); const client = useQueryClient();
+  const { t } = useI18n(); const { showToast } = useToast(); const client = useQueryClient();
   const predictions = useQuery({ queryKey: ["phase3", "predictions"], queryFn: () => core.phase3Records("predictions") });
   const autopsies = useQuery({ queryKey: ["phase3", "autopsies"], queryFn: () => core.phase3Records("autopsies") });
   const [examChoice, setExamChoice] = useState(""); const [discussion, setDiscussion] = useState(""); const [files, setFiles] = useState<File[]>([]); const [busy, setBusy] = useState(false);
-  const refresh = () => void Promise.all([client.invalidateQueries({ queryKey: ["phase3", "predictions"] }), client.invalidateQueries({ queryKey: ["phase3", "autopsies"] }), client.invalidateQueries({ queryKey: ["tasks"] }), client.invalidateQueries({ queryKey: ["mistakes"] })]);
+  const refresh = () => {
+    void Promise.all([
+      client.invalidateQueries({ queryKey: ["phase3", "predictions"] }),
+      client.invalidateQueries({ queryKey: ["phase3", "autopsies"] }),
+      client.invalidateQueries({ queryKey: ["tasks"] }),
+      client.invalidateQueries({ queryKey: ["mistakes"] }),
+    ]).catch((error) => showToast(message(error), "error"));
+  };
   const prediction = useMemo(() => predictions.data?.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0], [predictions.data]);
   const autopsy = useMemo(() => autopsies.data?.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0], [autopsies.data]);
   async function predict() {
