@@ -1,0 +1,124 @@
+name: Pre-merge Build Verification
+
+on:
+  pull_request:
+    branches:
+      - main
+  merge_group:
+    types:
+      - checks_requested
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-merge-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run TypeScript checks
+        run: npm run typecheck
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path core/Cargo.toml --all -- --check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path core/Cargo.toml --workspace --locked
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path core/Cargo.toml --workspace --all-targets --locked -- -D warnings
+
+  tauri:
+    name: Tauri ${{ matrix.platform }} bundle
+    needs:
+      - frontend
+      - rust
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS Apple Silicon
+            os: macos-latest
+            rust_target: aarch64-apple-darwin
+            tauri_args: --target aarch64-apple-darwin --bundles app,dmg
+            artifact_name: studypulse-pr-macos-aarch64
+            artifact_path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          - platform: Windows x86_64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            tauri_args: --target x86_64-pc-windows-msvc --bundles nsis
+            artifact_name: studypulse-pr-windows-x64
+            artifact_path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri bundle
+        run: npm run tauri:build -- ${{ matrix.tauri_args }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+          retention-days: 3
