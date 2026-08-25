@@ -2,6 +2,8 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { core } from "../lib/core";
 import { useI18n } from "../i18n";
+import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ConfirmDialog";
 import type { DiaryEntry, MistakeNote, TrendsSnapshot } from "../types";
 
 // Diary dates are keyed by the local calendar day for editing, then converted
@@ -89,12 +91,15 @@ function emptyDiary(day = dayKey()): DiaryDraft {
 
 export function DiaryPage() {
   const { language, t } = useI18n();
+  const { showToast } = useToast();
+  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const entriesQuery = useQuery({ queryKey: ["diary"], queryFn: core.diaryEntries });
   const [rangeDays, setRangeDays] = useState<7 | 30>(30);
   const trendQuery = useQuery({ queryKey: ["trends", rangeDays], queryFn: () => core.learningTrends(rangeDays) });
   const [draft, setDraft] = useState<DiaryDraft>(() => emptyDiary());
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   // The diary list is sorted locally for stable newest-first editing, while
   // trend data remains the Core-derived snapshot for the selected range.
   const entries = useMemo(() => [...(entriesQuery.data ?? [])].sort((a, b) => b.date.localeCompare(a.date) || b.updated_at.localeCompare(a.updated_at)), [entriesQuery.data]);
@@ -102,11 +107,13 @@ export function DiaryPage() {
     // Editing preserves identity and creation metadata; a new entry gets a
     // UUID and both mood/energy values are clamped to the five-point contract.
     if (!draft.date) {
-      window.alert(t("diary.validationDate"));
+      showToast(t("diary.validationDate"), "error");
       return;
     }
+    if (saving) return;
     const current = editingId ? entries.find((entry) => entry.id === editingId) : undefined;
     const now = new Date().toISOString();
+    setSaving(true);
     try {
       await core.upsertDiaryEntry({
         id: current?.id ?? crypto.randomUUID(),
@@ -126,8 +133,11 @@ export function DiaryPage() {
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
       setEditingId(null);
       setDraft(emptyDiary());
+      showToast(t("common.saved"), "success");
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      showToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setSaving(false);
     }
   };
   const edit = (entry: DiaryEntry) => {
@@ -139,8 +149,9 @@ export function DiaryPage() {
   const remove = async (entry: DiaryEntry) => {
     // Deletion is confirmed in the UI, then the same diary/trends invalidation
     // keeps derived charts from displaying removed data.
-    if (!window.confirm(t("diary.confirmDelete"))) return;
     try {
+      const ok = await confirm({ title: t("diary.delete"), message: t("diary.confirmDelete"), isDestructive: true });
+      if (!ok) return;
       await core.deleteDiaryEntry(entry.id);
       await queryClient.invalidateQueries({ queryKey: ["diary"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
@@ -148,8 +159,9 @@ export function DiaryPage() {
         setEditingId(null);
         setDraft(emptyDiary());
       }
+      showToast(t("common.saved"), "success");
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      showToast(error instanceof Error ? error.message : String(error), "error");
     }
   };
   if (entriesQuery.isLoading || trendQuery.isLoading) return <div className="page-content"><div className="skeleton-card" /><div className="skeleton-card short" /></div>;
@@ -168,7 +180,7 @@ export function DiaryPage() {
           <label>{t("diary.energy")}<input type="range" min="1" max="5" value={draft.energy_score} onChange={(event) => setDraft((value) => ({ ...value, energy_score: Number(event.target.value) }))} /><span className="range-value">{draft.energy_score}/5</span></label>
           <label>{t("diary.tag")}<input value={draft.energy_tag} onChange={(event) => setDraft((value) => ({ ...value, energy_tag: event.target.value }))} placeholder={t("diary.tagPlaceholder")} /></label>
           <label>{t("diary.content")}<textarea rows={8} value={draft.content} onChange={(event) => setDraft((value) => ({ ...value, content: event.target.value }))} placeholder={t("diary.contentPlaceholder")} /></label>
-          <div className="form-actions"><button className="button primary" onClick={() => void save()}>{editingId ? t("diary.update") : t("diary.save")}</button>{editingId && <button className="button subtle" onClick={() => { setEditingId(null); setDraft(emptyDiary()); }}>{t("diary.cancel")}</button>}</div>
+          <div className="form-actions"><button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? t("common.saving") : editingId ? t("diary.update") : t("diary.save")}</button>{editingId && <button className="button subtle" onClick={() => { setEditingId(null); setDraft(emptyDiary()); }} disabled={saving}>{t("diary.cancel")}</button>}</div>
         </div>
       </section>
       <section className="panel p1-chart-card">
@@ -214,6 +226,7 @@ function sortedMistakes(values: MistakeNote[]): MistakeNote[] {
 
 export function FlashcardsPage() {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const queryClient = useQueryClient();
   const dueQuery = useQuery({ queryKey: ["flashcards"], queryFn: core.dueMistakes });
   const allQuery = useQuery({ queryKey: ["mistakes"], queryFn: core.mistakes });
@@ -254,7 +267,7 @@ export function FlashcardsPage() {
       await queryClient.invalidateQueries({ queryKey: ["flashcards"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      showToast(error instanceof Error ? error.message : String(error), "error");
     } finally {
       setBusy(false);
     }
