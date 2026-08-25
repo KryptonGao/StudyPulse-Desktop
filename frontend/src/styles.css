@@ -2560,6 +2560,51 @@ input[type="range"] {
   gap: 6px;
 }
 
+.input-prompt {
+  color: var(--text-secondary);
+  font-size: var(--type-meta);
+  line-height: 1.55;
+}
+
+.input-prompt .math-text-container {
+  display: block;
+}
+
+.input-prompt .math-text-container p {
+  margin: 0;
+}
+
+.input-prompt .math-text-container p + p {
+  margin-top: 7px;
+}
+
+.input-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.input-option {
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  font-size: var(--type-caption);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.input-option:hover:not(:disabled),
+.input-option.selected {
+  color: var(--accent-base);
+  background: var(--accent-subtle);
+  border-color: var(--accent-base);
+}
+
+.input-answer {
+  min-height: 64px;
+}
+
 .agent-recovery-banner {
   flex-direction: row;
   align-items: flex-start;
@@ -3082,8 +3127,22 @@ input[type="range"] {
 }
 
 .flashcard-card h2 {
+  width: 100%;
   font-size: 23px;
   letter-spacing: -0.025em;
+}
+
+.flashcard-card h2 .math-text-container {
+  display: inline;
+}
+
+.flashcard-card .math-text-container {
+  display: block;
+  width: 100%;
+}
+
+.flashcard-card .math-text-container p {
+  margin: 0;
 }
 
 .flashcard-card p,
@@ -3092,10 +3151,26 @@ input[type="range"] {
   line-height: 1.65;
 }
 
+.flashcard-question {
+  width: 100%;
+}
+
 .flashcard-answer {
   display: flex;
+  width: 100%;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.flashcard-answer-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.flashcard-answer-field > strong {
+  color: var(--text-primary);
+  font-size: var(--type-meta);
 }
 
 .rating-row {

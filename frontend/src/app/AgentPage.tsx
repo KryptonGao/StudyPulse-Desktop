@@ -3,7 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import { pythonCodeForCompletedEvent, pythonCodeForConfirmation } from "../lib/agentEvents";
+import {
+  parseAgentInputRequest,
+  pythonCodeForCompletedEvent,
+  pythonCodeForConfirmation,
+} from "../lib/agentEvents";
 import { core } from "../lib/core";
 import { localizeEnum, useI18n, type Translate } from "../i18n";
 import type {
@@ -18,6 +22,7 @@ import type {
   SourceRef,
   UsageSummary,
 } from "../types";
+import MathText from "../components/MathText";
 import { AppIcon, formatDate } from "../components/UIComponents";
 import { useToast } from "../components/Toast";
 
@@ -176,6 +181,7 @@ export function AgentPage({
   const [answer, setAnswer] = useState("");
   const [pending, setPending] = useState<AgentEvent>();
   const [pendingInput, setPendingInput] = useState("");
+  const [submittingInput, setSubmittingInput] = useState(false);
   const [activity, setActivity] = useState<string>();
   const [sources, setSources] = useState<SourceRef[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactRef[]>([]);
@@ -378,6 +384,8 @@ export function AgentPage({
         }
         if (event.kind === "InputRequired") {
           setPending(event);
+          setPendingInput("");
+          setSubmittingInput(false);
         }
         if (event.kind === "Failed") {
           terminalStatus = "failed";
@@ -460,6 +468,8 @@ export function AgentPage({
       setUsage(undefined);
       setStructuredOutput(null);
       setPending(undefined);
+      setPendingInput("");
+      setSubmittingInput(false);
 
       const id = await core.startTurn({
         mode,
@@ -546,8 +556,9 @@ export function AgentPage({
   }
 
   async function resolveInput() {
-    if (!pending?.confirmation_id || !runId || !pendingInput.trim()) return;
+    if (!pending?.confirmation_id || !runId || !pendingInput.trim() || submittingInput) return;
     setErrorMessage(undefined);
+    setSubmittingInput(true);
     const answerJson = JSON.stringify({ answer: pendingInput });
     try {
       await core.submitAgentInput(runId, pending.confirmation_id, answerJson);
@@ -555,6 +566,8 @@ export function AgentPage({
       setPendingInput("");
     } catch (error) {
       reportError(error);
+    } finally {
+      setSubmittingInput(false);
     }
   }
 
@@ -597,6 +610,8 @@ export function AgentPage({
     setUsage(undefined);
     setStructuredOutput(null);
     setAnswer("");
+    setPendingInput("");
+    setSubmittingInput(false);
     setActivity(t("agent.starting"));
 
     try {
@@ -649,6 +664,7 @@ export function AgentPage({
   }
 
   const pendingPythonCode = pythonCodeForConfirmation(pending);
+  const pendingInputRequest = pending?.kind === "InputRequired" ? parseAgentInputRequest(pending) : null;
   const contextSourceLabels = Array.from(
     new Set([...effectiveSourcePaths, ...sources.map((s) => s.title ?? s.locator)])
   ).slice(0, 15);
@@ -836,14 +852,35 @@ export function AgentPage({
                 <span className="permission-badge">?</span>
                 <div className="input-body">
                   <strong>{t("agent.inputRequired")}</strong>
-                  <p>{pending.preview ?? t("agent.inputFallback")}</p>
-                  <input
-                    type="text"
+                  <div className="input-prompt">
+                    <MathText
+                      content={pendingInputRequest?.prompt || t("agent.inputFallback")}
+                    />
+                  </div>
+                  {pendingInputRequest?.options.length ? (
+                    <div className="input-options" role="group" aria-label={t("agent.inputRequired")}>
+                      {pendingInputRequest.options.map((option) => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={`input-option ${pendingInput === option ? "selected" : ""}`}
+                          onClick={() => setPendingInput(option)}
+                          disabled={submittingInput}
+                        >
+                          {option}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <textarea
+                    className="input-answer"
                     value={pendingInput}
                     onChange={(e) => setPendingInput(e.target.value)}
                     placeholder={t("agent.answerPlaceholder")}
+                    rows={2}
+                    disabled={submittingInput}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") {
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         void resolveInput();
                       }
@@ -853,7 +890,8 @@ export function AgentPage({
                 <button
                   className="button primary small"
                   onClick={() => void resolveInput()}
-                  disabled={!pendingInput.trim()}
+                  disabled={!pendingInput.trim() || submittingInput}
+                  aria-busy={submittingInput}
                 >
                   {t("agent.send")}
                 </button>

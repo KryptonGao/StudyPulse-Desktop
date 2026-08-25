@@ -4,6 +4,7 @@ import { core } from "../lib/core";
 import { useI18n } from "../i18n";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ConfirmDialog";
+import MathText from "../components/MathText";
 import type { DiaryEntry, MistakeNote, TrendsSnapshot } from "../types";
 
 // Diary dates are keyed by the local calendar day for editing, then converted
@@ -285,5 +286,85 @@ export function FlashcardsPage() {
   if (dueQuery.isLoading || allQuery.isLoading) return <div className="page-content"><div className="skeleton-card" /></div>;
   if (dueQuery.error || allQuery.error) return <div className="page-content"><div className="panel error-card"><strong>{t("error.section")}</strong><p>{String(dueQuery.error ?? allQuery.error)}</p></div></div>;
   const enrolled = (allQuery.data ?? []).filter((mistake) => mistake.review_state !== null).length;
-  return <div className="page-content p1-page"><Section title={t("flashcards.title")} description={t("flashcards.description")} action={<span className="status-pill on">{t("flashcards.enrolled", { count: enrolled })}</span>} />{summary ? <section className="panel flashcard-summary"><div className="summary-mark">✓</div><h2>{t("flashcards.summaryTitle")}</h2><p className="muted">{t("flashcards.summaryCopy", { count: stats.reviewed })}</p><div className="review-stat-grid"><span><strong>{stats.again}</strong>{t("flashcards.again")}</span><span><strong>{stats.hard}</strong>{t("flashcards.hard")}</span><span><strong>{stats.good}</strong>{t("flashcards.good")}</span><span><strong>{stats.easy}</strong>{t("flashcards.easy")}</span></div><button className="button primary" onClick={reset}>{t("flashcards.reviewAgain")}</button></section> : current ? <section className="flashcard-session"><div className="flashcard-toolbar"><span>{t("flashcards.progress", { current: stats.reviewed + 1, total: stats.reviewed + activeQueue.length })}</span><span>{current.subject || t("today.general")}</span></div><button className={`flashcard-card panel ${flipped ? "flipped" : ""}`} onClick={() => setFlipped((value) => !value)} type="button"><span className="flashcard-side-label">{flipped ? t("flashcards.answer") : t("flashcards.question")}</span><h2>{current.title || t("mistakes.untitled")}</h2>{!flipped ? <p>{current.original_question || t("mistakes.noQuestion")}</p> : <div className="flashcard-answer"><p><strong>{t("flashcards.reason")}</strong>{current.error_reason || "—"}</p><p><strong>{t("flashcards.wrongSolution")}</strong>{current.wrong_solution || "—"}</p><p><strong>{t("flashcards.correctSolution")}</strong>{current.correct_solution || "—"}</p></div>}<span className="flashcard-hint">{flipped ? t("flashcards.clickQuestion") : t("flashcards.clickAnswer")}</span></button><div className="rating-row"><button className="rating-button again" disabled={!flipped || busy} onClick={() => void rate(1)}><strong>{t("flashcards.again")}</strong><span>{t("flashcards.againHint")}</span></button><button className="rating-button hard" disabled={!flipped || busy} onClick={() => void rate(3)}><strong>{t("flashcards.hard")}</strong><span>{t("flashcards.hardHint")}</span></button><button className="rating-button good" disabled={!flipped || busy} onClick={() => void rate(4)}><strong>{t("flashcards.good")}</strong><span>{t("flashcards.goodHint")}</span></button><button className="rating-button easy" disabled={!flipped || busy} onClick={() => void rate(5)}><strong>{t("flashcards.easy")}</strong><span>{t("flashcards.easyHint")}</span></button></div></section> : <section className="panel p1-empty flashcard-empty"><div className="empty-orb">✦</div><h3>{t("flashcards.empty")}</h3><p>{enrolled ? t("flashcards.emptyDue") : t("flashcards.emptyEnroll")}</p></section>}</div>;
+  return (
+    <div className="page-content p1-page">
+      <Section
+        title={t("flashcards.title")}
+        description={t("flashcards.description")}
+        action={<span className="status-pill on">{t("flashcards.enrolled", { count: enrolled })}</span>}
+      />
+      {summary ? (
+        <section className="panel flashcard-summary">
+          <div className="summary-mark">✓</div>
+          <h2>{t("flashcards.summaryTitle")}</h2>
+          <p className="muted">{t("flashcards.summaryCopy", { count: stats.reviewed })}</p>
+          <div className="review-stat-grid">
+            <span><strong>{stats.again}</strong>{t("flashcards.again")}</span>
+            <span><strong>{stats.hard}</strong>{t("flashcards.hard")}</span>
+            <span><strong>{stats.good}</strong>{t("flashcards.good")}</span>
+            <span><strong>{stats.easy}</strong>{t("flashcards.easy")}</span>
+          </div>
+          <button className="button primary" onClick={reset}>{t("flashcards.reviewAgain")}</button>
+        </section>
+      ) : current ? (
+        <section className="flashcard-session">
+          <div className="flashcard-toolbar">
+            <span>{t("flashcards.progress", { current: stats.reviewed + 1, total: stats.reviewed + activeQueue.length })}</span>
+            <span>{current.subject || t("today.general")}</span>
+          </div>
+          <button
+            className={`flashcard-card panel ${flipped ? "flipped" : ""}`}
+            onClick={() => setFlipped((value) => !value)}
+            type="button"
+          >
+            <span className="flashcard-side-label">{flipped ? t("flashcards.answer") : t("flashcards.question")}</span>
+            <h2>
+              <MathText content={current.title || t("mistakes.untitled")} inline />
+            </h2>
+            {!flipped ? (
+              <div className="flashcard-question">
+                <MathText content={current.original_question || t("mistakes.noQuestion")} />
+              </div>
+            ) : (
+              <div className="flashcard-answer">
+                <div className="flashcard-answer-field">
+                  <strong>{t("flashcards.reason")}</strong>
+                  <MathText content={current.error_reason || "—"} />
+                </div>
+                <div className="flashcard-answer-field">
+                  <strong>{t("flashcards.wrongSolution")}</strong>
+                  <MathText content={current.wrong_solution || "—"} />
+                </div>
+                <div className="flashcard-answer-field">
+                  <strong>{t("flashcards.correctSolution")}</strong>
+                  <MathText content={current.correct_solution || "—"} />
+                </div>
+              </div>
+            )}
+            <span className="flashcard-hint">{flipped ? t("flashcards.clickQuestion") : t("flashcards.clickAnswer")}</span>
+          </button>
+          <div className="rating-row">
+            <button className="rating-button again" disabled={!flipped || busy} onClick={() => void rate(1)}>
+              <strong>{t("flashcards.again")}</strong><span>{t("flashcards.againHint")}</span>
+            </button>
+            <button className="rating-button hard" disabled={!flipped || busy} onClick={() => void rate(3)}>
+              <strong>{t("flashcards.hard")}</strong><span>{t("flashcards.hardHint")}</span>
+            </button>
+            <button className="rating-button good" disabled={!flipped || busy} onClick={() => void rate(4)}>
+              <strong>{t("flashcards.good")}</strong><span>{t("flashcards.goodHint")}</span>
+            </button>
+            <button className="rating-button easy" disabled={!flipped || busy} onClick={() => void rate(5)}>
+              <strong>{t("flashcards.easy")}</strong><span>{t("flashcards.easyHint")}</span>
+            </button>
+          </div>
+        </section>
+      ) : (
+        <section className="panel p1-empty flashcard-empty">
+          <div className="empty-orb">✦</div>
+          <h3>{t("flashcards.empty")}</h3>
+          <p>{enrolled ? t("flashcards.emptyDue") : t("flashcards.emptyEnroll")}</p>
+        </section>
+      )}
+    </div>
+  );
 }
