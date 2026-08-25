@@ -793,8 +793,6 @@ pub struct AgentTurnDto {
     pub id: String,
     pub mode: String,
     pub goal: String,
-    #[serde(default)]
-    pub notebook_id: Option<String>,
     pub status: String,
     pub stage: Option<String>,
     pub loop_index: u32,
@@ -5180,7 +5178,6 @@ impl From<WorkspaceAgentTurn> for AgentTurnDto {
             id: value.id,
             mode: value.mode,
             goal: value.goal,
-            notebook_id: value.notebook_id,
             status: value.status,
             stage: value.stage,
             loop_index: value.loop_index,

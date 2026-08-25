@@ -3,7 +3,6 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./app/App";
 import { I18nProvider } from "./i18n";
-import "katex/dist/katex.min.css";
 import "./styles.css";
 
 // One QueryClient is shared by every page so query keys and invalidation calls

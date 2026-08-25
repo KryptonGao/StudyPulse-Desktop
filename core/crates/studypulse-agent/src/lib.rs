@@ -36,18 +36,6 @@ struct ToolPolicy {
     read_only: bool,
 }
 
-#[derive(Debug, Default)]
-struct TurnMetadata {
-    notebook_id: Option<String>,
-    config_json: Option<String>,
-}
-
-#[derive(Debug)]
-struct RunOptions {
-    metadata: TurnMetadata,
-    tool_policy: ToolPolicy,
-}
-
 // Modes describe user-visible workflows rather than separate runtimes.  The
 // manifest below supplies stage labels and a loop budget, while the runtime
 // still uses one common state machine for all modes.  Keeping this mapping in
@@ -662,12 +650,9 @@ impl AgentRuntime {
             source_paths,
             history,
             Vec::new(),
-            RunOptions {
-                metadata: TurnMetadata::default(),
-                tool_policy: ToolPolicy {
-                    allow_tools: true,
-                    read_only: false,
-                },
+            ToolPolicy {
+                allow_tools: true,
+                read_only: false,
             },
         )
     }
@@ -690,48 +675,41 @@ impl AgentRuntime {
             source_paths,
             history,
             attachments,
-            RunOptions {
-                metadata: TurnMetadata::default(),
-                tool_policy: ToolPolicy {
-                    allow_tools,
-                    read_only: true,
-                },
+            ToolPolicy {
+                allow_tools,
+                read_only: true,
             },
         )
     }
 
     pub fn start_turn(self: &Arc<Self>, request: TurnRequest) -> Result<String, AgentError> {
-        let TurnRequest {
-            mode,
-            goal,
-            source_paths,
-            history,
-            notebook_id,
-            config_json,
-        } = request;
+        let notebook_id = request.notebook_id.clone();
+        let config_json = request.config_json.clone();
         if config_json
             .as_ref()
             .is_some_and(|value| value.len() > 64 * 1024)
         {
             return Err(AgentError::Runtime("turn config exceeds 64 KiB".into()));
         }
-        self.start_agent_with_mode_and_policy(
-            mode,
-            goal,
-            source_paths,
-            history,
+        let run_id = self.start_agent_with_mode_and_policy(
+            request.mode,
+            request.goal,
+            request.source_paths,
+            request.history,
             Vec::new(),
-            RunOptions {
-                metadata: TurnMetadata {
-                    notebook_id,
-                    config_json,
-                },
-                tool_policy: ToolPolicy {
-                    allow_tools: true,
-                    read_only: false,
-                },
+            ToolPolicy {
+                allow_tools: true,
+                read_only: false,
             },
-        )
+        )?;
+        if (notebook_id.is_some() || config_json.is_some())
+            && let Ok(mut turn) = self.workspace.read_agent_turn(&run_id)
+        {
+            turn.notebook_id = notebook_id;
+            turn.config_json = config_json;
+            let _ = self.workspace.write_agent_turn(&turn);
+        }
+        Ok(run_id)
     }
 
     pub fn list_turns(&self) -> Result<Vec<AgentTurn>, AgentError> {
@@ -766,40 +744,17 @@ impl AgentRuntime {
                 "stored Agent transcript is empty".into(),
             ));
         }
-        let notebook_id = turn.notebook_id.clone();
-        let config_json = turn.config_json.clone();
-        let run_id = self.start_agent_from_messages(
+        self.start_agent_from_messages(
             mode,
-            turn.goal.clone(),
-            turn.source_paths.clone(),
+            turn.goal,
+            turn.source_paths,
             messages,
             Vec::new(),
-            RunOptions {
-                metadata: TurnMetadata {
-                    notebook_id,
-                    config_json,
-                },
-                tool_policy: ToolPolicy {
-                    allow_tools: turn.allow_tools,
-                    read_only: turn.read_only,
-                },
+            ToolPolicy {
+                allow_tools: turn.allow_tools,
+                read_only: turn.read_only,
             },
-        )?;
-
-        // The resumed run has its own durable checkpoint. Marking the source
-        // checkpoint as consumed prevents it from being offered repeatedly
-        // after the new run completes, while cloning the original turn keeps
-        // its Notebook identity intact for audit/recovery.
-        let mut resumed_turn = turn;
-        resumed_turn.status = "resumed".into();
-        resumed_turn.checkpoint = "resumed".into();
-        resumed_turn.resume_safe = false;
-        resumed_turn.updated_at = self
-            .clock
-            .now()
-            .to_rfc3339_opts(SecondsFormat::Millis, true);
-        let _ = self.workspace.write_agent_turn(&resumed_turn);
-        Ok(run_id)
+        )
     }
 
     /// Return a live result when the run is in this process, otherwise replay
@@ -850,12 +805,8 @@ impl AgentRuntime {
         source_paths: Vec<String>,
         history: Vec<ConversationMessage>,
         attachments: Vec<ModelImageAttachment>,
-        options: RunOptions,
+        tool_policy: ToolPolicy,
     ) -> Result<String, AgentError> {
-        let RunOptions {
-            metadata,
-            tool_policy,
-        } = options;
         // Input validation occurs before the run id is reserved.  This is
         // important for callers that retry a rejected request: an invalid goal
         // must not consume the single active-run slot or leave a phantom run
@@ -912,8 +863,8 @@ impl AgentRuntime {
                 .unwrap_or_else(|_| "\"chat\"".into())
                 .trim_matches('"')
                 .to_owned(),
-            notebook_id: metadata.notebook_id,
-            config_json: metadata.config_json,
+            notebook_id: None,
+            config_json: None,
             goal: goal.clone(),
             source_paths: source_paths.clone(),
             allow_tools: tool_policy.allow_tools,
@@ -977,12 +928,8 @@ impl AgentRuntime {
         requested_source_paths: Vec<String>,
         messages: Vec<ChatMessage>,
         attachments: Vec<ModelImageAttachment>,
-        options: RunOptions,
+        tool_policy: ToolPolicy,
     ) -> Result<String, AgentError> {
-        let RunOptions {
-            metadata,
-            tool_policy,
-        } = options;
         if goal.trim().is_empty() || messages.is_empty() {
             return Err(AgentError::Runtime(
                 "resumed Agent turn is incomplete".into(),
@@ -1009,8 +956,8 @@ impl AgentRuntime {
                 .unwrap_or_else(|_| "\"chat\"".into())
                 .trim_matches('"')
                 .to_owned(),
-            notebook_id: metadata.notebook_id,
-            config_json: metadata.config_json,
+            notebook_id: None,
+            config_json: None,
             goal: goal.clone(),
             source_paths: source_paths.clone(),
             allow_tools: tool_policy.allow_tools,

@@ -2,9 +2,6 @@ import { useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { core } from "../lib/core";
 import { useI18n } from "../i18n";
-import { useToast } from "../components/Toast";
-import { useConfirm } from "../components/ConfirmDialog";
-import MathText from "../components/MathText";
 import type { DiaryEntry, MistakeNote, TrendsSnapshot } from "../types";
 
 // Diary dates are keyed by the local calendar day for editing, then converted
@@ -92,15 +89,12 @@ function emptyDiary(day = dayKey()): DiaryDraft {
 
 export function DiaryPage() {
   const { language, t } = useI18n();
-  const { showToast } = useToast();
-  const confirm = useConfirm();
   const queryClient = useQueryClient();
   const entriesQuery = useQuery({ queryKey: ["diary"], queryFn: core.diaryEntries });
   const [rangeDays, setRangeDays] = useState<7 | 30>(30);
   const trendQuery = useQuery({ queryKey: ["trends", rangeDays], queryFn: () => core.learningTrends(rangeDays) });
   const [draft, setDraft] = useState<DiaryDraft>(() => emptyDiary());
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
   // The diary list is sorted locally for stable newest-first editing, while
   // trend data remains the Core-derived snapshot for the selected range.
   const entries = useMemo(() => [...(entriesQuery.data ?? [])].sort((a, b) => b.date.localeCompare(a.date) || b.updated_at.localeCompare(a.updated_at)), [entriesQuery.data]);
@@ -108,13 +102,11 @@ export function DiaryPage() {
     // Editing preserves identity and creation metadata; a new entry gets a
     // UUID and both mood/energy values are clamped to the five-point contract.
     if (!draft.date) {
-      showToast(t("diary.validationDate"), "error");
+      window.alert(t("diary.validationDate"));
       return;
     }
-    if (saving) return;
     const current = editingId ? entries.find((entry) => entry.id === editingId) : undefined;
     const now = new Date().toISOString();
-    setSaving(true);
     try {
       await core.upsertDiaryEntry({
         id: current?.id ?? crypto.randomUUID(),
@@ -134,11 +126,8 @@ export function DiaryPage() {
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
       setEditingId(null);
       setDraft(emptyDiary());
-      showToast(t("common.saved"), "success");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setSaving(false);
+      window.alert(error instanceof Error ? error.message : String(error));
     }
   };
   const edit = (entry: DiaryEntry) => {
@@ -150,9 +139,8 @@ export function DiaryPage() {
   const remove = async (entry: DiaryEntry) => {
     // Deletion is confirmed in the UI, then the same diary/trends invalidation
     // keeps derived charts from displaying removed data.
+    if (!window.confirm(t("diary.confirmDelete"))) return;
     try {
-      const ok = await confirm({ title: t("diary.delete"), message: t("diary.confirmDelete"), isDestructive: true });
-      if (!ok) return;
       await core.deleteDiaryEntry(entry.id);
       await queryClient.invalidateQueries({ queryKey: ["diary"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
@@ -160,9 +148,8 @@ export function DiaryPage() {
         setEditingId(null);
         setDraft(emptyDiary());
       }
-      showToast(t("common.saved"), "success");
     } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), "error");
+      window.alert(error instanceof Error ? error.message : String(error));
     }
   };
   if (entriesQuery.isLoading || trendQuery.isLoading) return <div className="page-content"><div className="skeleton-card" /><div className="skeleton-card short" /></div>;
@@ -181,7 +168,7 @@ export function DiaryPage() {
           <label>{t("diary.energy")}<input type="range" min="1" max="5" value={draft.energy_score} onChange={(event) => setDraft((value) => ({ ...value, energy_score: Number(event.target.value) }))} /><span className="range-value">{draft.energy_score}/5</span></label>
           <label>{t("diary.tag")}<input value={draft.energy_tag} onChange={(event) => setDraft((value) => ({ ...value, energy_tag: event.target.value }))} placeholder={t("diary.tagPlaceholder")} /></label>
           <label>{t("diary.content")}<textarea rows={8} value={draft.content} onChange={(event) => setDraft((value) => ({ ...value, content: event.target.value }))} placeholder={t("diary.contentPlaceholder")} /></label>
-          <div className="form-actions"><button className="button primary" onClick={() => void save()} disabled={saving}>{saving ? t("common.saving") : editingId ? t("diary.update") : t("diary.save")}</button>{editingId && <button className="button subtle" onClick={() => { setEditingId(null); setDraft(emptyDiary()); }} disabled={saving}>{t("diary.cancel")}</button>}</div>
+          <div className="form-actions"><button className="button primary" onClick={() => void save()}>{editingId ? t("diary.update") : t("diary.save")}</button>{editingId && <button className="button subtle" onClick={() => { setEditingId(null); setDraft(emptyDiary()); }}>{t("diary.cancel")}</button>}</div>
         </div>
       </section>
       <section className="panel p1-chart-card">
@@ -227,7 +214,6 @@ function sortedMistakes(values: MistakeNote[]): MistakeNote[] {
 
 export function FlashcardsPage() {
   const { t } = useI18n();
-  const { showToast } = useToast();
   const queryClient = useQueryClient();
   const dueQuery = useQuery({ queryKey: ["flashcards"], queryFn: core.dueMistakes });
   const allQuery = useQuery({ queryKey: ["mistakes"], queryFn: core.mistakes });
@@ -268,7 +254,7 @@ export function FlashcardsPage() {
       await queryClient.invalidateQueries({ queryKey: ["flashcards"] });
       await queryClient.invalidateQueries({ queryKey: ["trends"] });
     } catch (error) {
-      showToast(error instanceof Error ? error.message : String(error), "error");
+      window.alert(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -286,85 +272,5 @@ export function FlashcardsPage() {
   if (dueQuery.isLoading || allQuery.isLoading) return <div className="page-content"><div className="skeleton-card" /></div>;
   if (dueQuery.error || allQuery.error) return <div className="page-content"><div className="panel error-card"><strong>{t("error.section")}</strong><p>{String(dueQuery.error ?? allQuery.error)}</p></div></div>;
   const enrolled = (allQuery.data ?? []).filter((mistake) => mistake.review_state !== null).length;
-  return (
-    <div className="page-content p1-page">
-      <Section
-        title={t("flashcards.title")}
-        description={t("flashcards.description")}
-        action={<span className="status-pill on">{t("flashcards.enrolled", { count: enrolled })}</span>}
-      />
-      {summary ? (
-        <section className="panel flashcard-summary">
-          <div className="summary-mark">✓</div>
-          <h2>{t("flashcards.summaryTitle")}</h2>
-          <p className="muted">{t("flashcards.summaryCopy", { count: stats.reviewed })}</p>
-          <div className="review-stat-grid">
-            <span><strong>{stats.again}</strong>{t("flashcards.again")}</span>
-            <span><strong>{stats.hard}</strong>{t("flashcards.hard")}</span>
-            <span><strong>{stats.good}</strong>{t("flashcards.good")}</span>
-            <span><strong>{stats.easy}</strong>{t("flashcards.easy")}</span>
-          </div>
-          <button className="button primary" onClick={reset}>{t("flashcards.reviewAgain")}</button>
-        </section>
-      ) : current ? (
-        <section className="flashcard-session">
-          <div className="flashcard-toolbar">
-            <span>{t("flashcards.progress", { current: stats.reviewed + 1, total: stats.reviewed + activeQueue.length })}</span>
-            <span>{current.subject || t("today.general")}</span>
-          </div>
-          <button
-            className={`flashcard-card panel ${flipped ? "flipped" : ""}`}
-            onClick={() => setFlipped((value) => !value)}
-            type="button"
-          >
-            <span className="flashcard-side-label">{flipped ? t("flashcards.answer") : t("flashcards.question")}</span>
-            <h2>
-              <MathText content={current.title || t("mistakes.untitled")} inline />
-            </h2>
-            {!flipped ? (
-              <div className="flashcard-question">
-                <MathText content={current.original_question || t("mistakes.noQuestion")} />
-              </div>
-            ) : (
-              <div className="flashcard-answer">
-                <div className="flashcard-answer-field">
-                  <strong>{t("flashcards.reason")}</strong>
-                  <MathText content={current.error_reason || "—"} />
-                </div>
-                <div className="flashcard-answer-field">
-                  <strong>{t("flashcards.wrongSolution")}</strong>
-                  <MathText content={current.wrong_solution || "—"} />
-                </div>
-                <div className="flashcard-answer-field">
-                  <strong>{t("flashcards.correctSolution")}</strong>
-                  <MathText content={current.correct_solution || "—"} />
-                </div>
-              </div>
-            )}
-            <span className="flashcard-hint">{flipped ? t("flashcards.clickQuestion") : t("flashcards.clickAnswer")}</span>
-          </button>
-          <div className="rating-row">
-            <button className="rating-button again" disabled={!flipped || busy} onClick={() => void rate(1)}>
-              <strong>{t("flashcards.again")}</strong><span>{t("flashcards.againHint")}</span>
-            </button>
-            <button className="rating-button hard" disabled={!flipped || busy} onClick={() => void rate(3)}>
-              <strong>{t("flashcards.hard")}</strong><span>{t("flashcards.hardHint")}</span>
-            </button>
-            <button className="rating-button good" disabled={!flipped || busy} onClick={() => void rate(4)}>
-              <strong>{t("flashcards.good")}</strong><span>{t("flashcards.goodHint")}</span>
-            </button>
-            <button className="rating-button easy" disabled={!flipped || busy} onClick={() => void rate(5)}>
-              <strong>{t("flashcards.easy")}</strong><span>{t("flashcards.easyHint")}</span>
-            </button>
-          </div>
-        </section>
-      ) : (
-        <section className="panel p1-empty flashcard-empty">
-          <div className="empty-orb">✦</div>
-          <h3>{t("flashcards.empty")}</h3>
-          <p>{enrolled ? t("flashcards.emptyDue") : t("flashcards.emptyEnroll")}</p>
-        </section>
-      )}
-    </div>
-  );
+  return <div className="page-content p1-page"><Section title={t("flashcards.title")} description={t("flashcards.description")} action={<span className="status-pill on">{t("flashcards.enrolled", { count: enrolled })}</span>} />{summary ? <section className="panel flashcard-summary"><div className="summary-mark">✓</div><h2>{t("flashcards.summaryTitle")}</h2><p className="muted">{t("flashcards.summaryCopy", { count: stats.reviewed })}</p><div className="review-stat-grid"><span><strong>{stats.again}</strong>{t("flashcards.again")}</span><span><strong>{stats.hard}</strong>{t("flashcards.hard")}</span><span><strong>{stats.good}</strong>{t("flashcards.good")}</span><span><strong>{stats.easy}</strong>{t("flashcards.easy")}</span></div><button className="button primary" onClick={reset}>{t("flashcards.reviewAgain")}</button></section> : current ? <section className="flashcard-session"><div className="flashcard-toolbar"><span>{t("flashcards.progress", { current: stats.reviewed + 1, total: stats.reviewed + activeQueue.length })}</span><span>{current.subject || t("today.general")}</span></div><button className={`flashcard-card panel ${flipped ? "flipped" : ""}`} onClick={() => setFlipped((value) => !value)} type="button"><span className="flashcard-side-label">{flipped ? t("flashcards.answer") : t("flashcards.question")}</span><h2>{current.title || t("mistakes.untitled")}</h2>{!flipped ? <p>{current.original_question || t("mistakes.noQuestion")}</p> : <div className="flashcard-answer"><p><strong>{t("flashcards.reason")}</strong>{current.error_reason || "—"}</p><p><strong>{t("flashcards.wrongSolution")}</strong>{current.wrong_solution || "—"}</p><p><strong>{t("flashcards.correctSolution")}</strong>{current.correct_solution || "—"}</p></div>}<span className="flashcard-hint">{flipped ? t("flashcards.clickQuestion") : t("flashcards.clickAnswer")}</span></button><div className="rating-row"><button className="rating-button again" disabled={!flipped || busy} onClick={() => void rate(1)}><strong>{t("flashcards.again")}</strong><span>{t("flashcards.againHint")}</span></button><button className="rating-button hard" disabled={!flipped || busy} onClick={() => void rate(3)}><strong>{t("flashcards.hard")}</strong><span>{t("flashcards.hardHint")}</span></button><button className="rating-button good" disabled={!flipped || busy} onClick={() => void rate(4)}><strong>{t("flashcards.good")}</strong><span>{t("flashcards.goodHint")}</span></button><button className="rating-button easy" disabled={!flipped || busy} onClick={() => void rate(5)}><strong>{t("flashcards.easy")}</strong><span>{t("flashcards.easyHint")}</span></button></div></section> : <section className="panel p1-empty flashcard-empty"><div className="empty-orb">✦</div><h3>{t("flashcards.empty")}</h3><p>{enrolled ? t("flashcards.emptyDue") : t("flashcards.emptyEnroll")}</p></section>}</div>;
 }
