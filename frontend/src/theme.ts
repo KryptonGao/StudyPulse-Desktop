@@ -27,20 +27,20 @@ export const PRESET_DEFAULTS: Record<AppearancePreset, {
 }> = {
   openai: {
     light: {
-      accent: "#10a37f",
-      background: "#f7f7f8",
-      text: "#202123",
+      accent: "#111111",
+      background: "#ffffff",
+      text: "#0d0d0d",
       surface: "#ffffff",
-      surfaceMuted: "#ececf1",
-      line: "#e5e5e7",
+      surfaceMuted: "#f5f5f5",
+      line: "#e6e6e6",
     },
     dark: {
-      accent: "#10a37f",
-      background: "#212121",
-      text: "#ececec",
-      surface: "#2f2f2f",
-      surfaceMuted: "#3a3a3a",
-      line: "#424242",
+      accent: "#f5f5f5",
+      background: "#171717",
+      text: "#f7f7f8",
+      surface: "#242424",
+      surfaceMuted: "#303030",
+      line: "#414141",
     },
   },
   ocean: {
@@ -233,7 +233,10 @@ export function applyAppearanceToDom(prefs: AppearancePreferences): void {
 
   root.style.setProperty("--font-scale", String(prefs.fontScale));
   root.style.setProperty("--accent-base", accent);
-  root.style.setProperty("--accent-hover", accent);
+  const accentHover = preset === "openai"
+    ? mode === "dark" ? "#ffffff" : "#2f2f2f"
+    : accent;
+  root.style.setProperty("--accent-hover", accentHover);
   root.style.setProperty("--accent-contrast", accentText);
   root.style.setProperty("--accent-subtle", hexToRgba(accent, mode === "dark" ? 0.2 : 0.12));
   root.style.setProperty("--bg-app-solid", background);

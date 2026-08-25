@@ -114,6 +114,31 @@
   --code-text: #e5e7eb;
 }
 
+/* OpenAI/Codex palette: black actions and quiet blue-violet information
+   accents on a white canvas. These semantic colors are scoped to the preset
+   so Ocean and Violet remain independent themes. */
+[data-preset="openai"][data-theme="light"] {
+  --text-secondary: #5f6368;
+  --text-muted: #8b8b8f;
+  --sage-dark: #111111;
+  --clay: #7185f7;
+  --plum: #a495ff;
+  --gold: #8174df;
+  --info-base: #6579ee;
+  --warning-base: #846fd6;
+}
+
+[data-preset="openai"][data-theme="dark"] {
+  --text-secondary: #b7b7bc;
+  --text-muted: #85858c;
+  --sage-dark: #f5f5f5;
+  --clay: #9aa8ff;
+  --plum: #b9aaff;
+  --gold: #a99ef0;
+  --info-base: #90a0ff;
+  --warning-base: #aa98ec;
+}
+
 *,
 *::before,
 *::after {
@@ -2737,9 +2762,9 @@ input[type="range"] {
   border-radius: 50%;
 }
 
-.openai-preview .dot.accent { background: #10a37f; }
-.openai-preview .dot.surface { background: #343541; }
-.openai-preview .dot.text { background: #ececf1; }
+.openai-preview .dot.accent { background: #111111; }
+.openai-preview .dot.surface { background: #a9b4ff; }
+.openai-preview .dot.text { background: #ffffff; }
 .ocean-preview .dot.accent { background: #0284c7; }
 .ocean-preview .dot.surface { background: #343941; }
 .ocean-preview .dot.text { background: #e2e8f0; }
