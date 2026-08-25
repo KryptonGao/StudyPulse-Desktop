@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentEvent } from "../types";
-import { pythonCodeForCompletedEvent, pythonCodeForConfirmation } from "./agentEvents";
+import {
+  parseAgentInputRequest,
+  pythonCodeForCompletedEvent,
+  pythonCodeForConfirmation,
+} from "./agentEvents";
 
 // The fixture mirrors the complete wire shape so each test can override only
 // the event fields relevant to its timeline scenario.
@@ -89,5 +93,38 @@ describe("Agent Python code events", () => {
     });
 
     expect(pythonCodeForCompletedEvent(denied, [request, denied])).toBeNull();
+  });
+});
+
+describe("Agent input events", () => {
+  it("parses ask_user prompt and options instead of exposing raw JSON", () => {
+    const event = agentEvent({
+      kind: "InputRequired",
+      tool_name: "ask_user",
+      preview: JSON.stringify({
+        options: ["数学与微积分", "概率与统计", "数学与微积分"],
+        prompt: "请选择错题所属主题。",
+      }),
+      payload_json: null,
+      confirmation_id: "input-1",
+    });
+
+    expect(parseAgentInputRequest(event)).toEqual({
+      prompt: "请选择错题所属主题。",
+      options: ["数学与微积分", "概率与统计"],
+    });
+  });
+
+  it("keeps legacy plain-text previews readable and tolerates malformed payloads", () => {
+    const event = agentEvent({
+      kind: "InputRequired",
+      preview: "请补充题目内容。",
+      payload_json: "{",
+    });
+
+    expect(parseAgentInputRequest(event)).toEqual({
+      prompt: "请补充题目内容。",
+      options: [],
+    });
   });
 });

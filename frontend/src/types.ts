@@ -600,6 +600,9 @@ export interface AgentTurn {
   id: string;
   mode: string;
   goal: string;
+  // Newer Core builds preserve the originating Notebook on turn DTOs. Keep it
+  // optional so older desktop binaries can still replay their checkpoints.
+  notebook_id?: string | null;
   status: string;
   stage: string | null;
   loop_index: number;
