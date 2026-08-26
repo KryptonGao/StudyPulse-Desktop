@@ -1645,6 +1645,7 @@ mod tests {
     // selected-source behavior, and bounded local execution result.  They are
     // executable documentation for the safety claims above.
     use super::*;
+    use std::net::TcpStream;
 
     #[test]
     fn create_task_is_declared_write_and_does_not_write_during_prepare() {
@@ -1795,29 +1796,59 @@ mod tests {
         assert!(validate_runner_base_url("https://runner.example.com/#secret").is_err());
     }
 
-    #[test]
-    fn runner_client_does_not_follow_redirects_or_forward_bearer_token() {
-        use std::net::{TcpListener, TcpStream};
-        use std::thread;
-
-        fn read_request(mut stream: TcpStream) -> String {
-            let _ = stream.set_read_timeout(Some(StdDuration::from_millis(500)));
-            let mut bytes = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                match stream.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        bytes.extend_from_slice(&buffer[..count]);
-                        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
+    fn read_http_request(mut stream: TcpStream) -> Vec<u8> {
+        let _ = stream.set_read_timeout(Some(StdDuration::from_millis(500)));
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
                     }
+                }
+                Err(_) => break,
+            }
+        }
+
+        let header_end = bytes
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .unwrap_or(bytes.len());
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        let body_received = bytes.len().saturating_sub(header_end);
+        let remaining = content_length.saturating_sub(body_received);
+        if remaining > 0 {
+            let mut body = vec![0_u8; remaining];
+            let mut read_total = 0;
+            while read_total < remaining {
+                match stream.read(&mut body[read_total..]) {
+                    Ok(0) => break,
+                    Ok(count) => read_total += count,
                     Err(_) => break,
                 }
             }
-            String::from_utf8_lossy(&bytes).into_owned()
+            bytes.extend_from_slice(&body[..read_total]);
         }
+
+        bytes
+    }
+
+    #[test]
+    fn runner_client_does_not_follow_redirects_or_forward_bearer_token() {
+        use std::net::TcpListener;
+        use std::thread;
 
         let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let redirect_address = redirect_listener.local_addr().unwrap();
@@ -1829,7 +1860,11 @@ mod tests {
             let deadline = Instant::now() + StdDuration::from_millis(300);
             loop {
                 match target_listener.accept() {
-                    Ok((stream, _)) => return Some(read_request(stream)),
+                    Ok((stream, _)) => {
+                        return Some(
+                            String::from_utf8_lossy(&read_http_request(stream)).into_owned(),
+                        );
+                    }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline {
                             return None;
@@ -1843,7 +1878,8 @@ mod tests {
 
         let redirect_thread = thread::spawn(move || {
             let (mut stream, _) = redirect_listener.accept().unwrap();
-            let request = read_request(stream.try_clone().unwrap());
+            let request = String::from_utf8_lossy(&read_http_request(stream.try_clone().unwrap()))
+                .into_owned();
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
@@ -1874,6 +1910,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            let _request = read_http_request(stream.try_clone().unwrap());
             let response_body = r#"{"error":"runner-secret source-code stdin-secret"}"#;
             let response = format!(
                 "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
