@@ -1861,7 +1861,9 @@ mod tests {
             loop {
                 match target_listener.accept() {
                     Ok((stream, _)) => {
-                        return Some(String::from_utf8_lossy(&read_http_request(stream)).into_owned());
+                        return Some(
+                            String::from_utf8_lossy(&read_http_request(stream)).into_owned(),
+                        );
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline {
@@ -1876,7 +1878,8 @@ mod tests {
 
         let redirect_thread = thread::spawn(move || {
             let (mut stream, _) = redirect_listener.accept().unwrap();
-            let request = String::from_utf8_lossy(&read_http_request(stream.try_clone().unwrap())).into_owned();
+            let request = String::from_utf8_lossy(&read_http_request(stream.try_clone().unwrap()))
+                .into_owned();
             let response = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
