@@ -27,7 +27,7 @@ export const PRESET_DEFAULTS: Record<AppearancePreset, {
 }> = {
   openai: {
     light: {
-      accent: "#111111",
+      accent: "#0066da",
       background: "#ffffff",
       text: "#0d0d0d",
       surface: "#ffffff",
@@ -35,7 +35,7 @@ export const PRESET_DEFAULTS: Record<AppearancePreset, {
       line: "#e6e6e6",
     },
     dark: {
-      accent: "#f5f5f5",
+      accent: "#5b9eff",
       background: "#171717",
       text: "#f7f7f8",
       surface: "#242424",
@@ -46,7 +46,7 @@ export const PRESET_DEFAULTS: Record<AppearancePreset, {
   ocean: {
     light: {
       accent: "#0284c7",
-      background: "#f7f8fa",
+      background: "#ffffff",
       text: "#0f172a",
       surface: "#ffffff",
       surfaceMuted: "#eef1f4",
@@ -64,7 +64,7 @@ export const PRESET_DEFAULTS: Record<AppearancePreset, {
   violet: {
     light: {
       accent: "#7c3aed",
-      background: "#f8f8fa",
+      background: "#ffffff",
       text: "#1e1b4b",
       surface: "#ffffff",
       surfaceMuted: "#f0eff3",
@@ -234,13 +234,13 @@ export function applyAppearanceToDom(prefs: AppearancePreferences): void {
   root.style.setProperty("--font-scale", String(prefs.fontScale));
   root.style.setProperty("--accent-base", accent);
   const accentHover = preset === "openai"
-    ? mode === "dark" ? "#ffffff" : "#2f2f2f"
+    ? mode === "dark" ? "#7bb3ff" : "#0052ae"
     : accent;
   root.style.setProperty("--accent-hover", accentHover);
   root.style.setProperty("--accent-contrast", accentText);
   root.style.setProperty("--accent-subtle", hexToRgba(accent, mode === "dark" ? 0.2 : 0.12));
   root.style.setProperty("--bg-app-solid", background);
-  root.style.setProperty("--bg-app", hexToRgba(background, mode === "dark" ? 0.8 : 0.74));
+  root.style.setProperty("--bg-app", hexToRgba(background, mode === "dark" ? 0.8 : 1));
   root.style.setProperty("--bg-surface-solid", presetColors.surface);
   root.style.setProperty("--bg-surface", hexToRgba(presetColors.surface, mode === "dark" ? 0.86 : 0.82));
   root.style.setProperty("--bg-subtle", hexToRgba(presetColors.surfaceMuted, mode === "dark" ? 0.52 : 0.62));
