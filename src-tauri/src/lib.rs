@@ -35,6 +35,10 @@ const BYOK_ACCOUNT: &str = "openai-compatible";
 // even when the caller is not the trusted React UI.
 const MAX_SOURCE_BYTES: u64 = 1_048_576;
 
+// Report image exports are host-pinned to the PNG format; this signature
+// check keeps a renderer from labeling foreign bytes as the exported asset.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
 // Cloud tokens are serialized only as the value of this keyring entry; they
 // are never placed in Preferences, the Workspace, or a frontend DTO.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -126,6 +130,10 @@ pub struct AppState {
     preferences_path: PathBuf,
     preferences: Arc<Mutex<Preferences>>,
     byok_config: Arc<Mutex<Option<ByokConfigDto>>>,
+    // Process-local record of the report file the host last exported, used by
+    // share_report so opening a file never depends on a renderer-supplied
+    // path. Like the timer state, this intentionally does not persist.
+    last_report_export: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl AppState {
@@ -150,6 +158,7 @@ impl AppState {
             preferences_path,
             preferences: Arc::new(Mutex::new(preferences)),
             byok_config: Arc::new(Mutex::new(None)),
+            last_report_export: Arc::new(Mutex::new(None)),
         };
         if let Some(path) = state.preferences_snapshot()?.workspace_path
             && Path::new(&path).is_dir()
@@ -1021,63 +1030,188 @@ async fn get_learning_report(range_days: i64, state: State<'_, AppState>) -> Res
     core_call(state, move |core| core.get_learning_report_json(range_days)).await
 }
 
-// Report paths are resolved by the host because they are outside the normal
-// Workspace write API. The extension check, canonical parent, and Workspace
-// exclusion prevent a frontend path from silently targeting protected data.
-fn report_destination(path: &str, extension: &str, state: &AppState) -> Result<PathBuf, AppError> {
-    let candidate = PathBuf::from(path);
-    if candidate.file_name().is_none() || candidate.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case(extension)) != Some(true) {
-        return Err(AppError::InvalidInput { message: format!("report path must end with .{extension}") });
+// Report exports are the one host capability that writes outside the
+// Workspace, so the destination is never a renderer parameter. The host opens
+// the save dialog itself, pins the file extension to a fixed allowlist, and
+// refuses Workspace-internal paths; a compromised renderer can at most trigger
+// a user-visible dialog whose confirmed path it never controls.
+fn report_text_extension(format: &str) -> Option<&'static str> {
+    match format {
+        "md" => Some("md"),
+        "html" => Some("html"),
+        _ => None,
     }
-    let parent = candidate.parent().ok_or_else(|| AppError::InvalidInput { message: "report path has no parent directory".into() })?;
+}
+
+fn report_extension_label(extension: &str) -> &'static str {
+    match extension {
+        "md" => "Markdown",
+        "html" => "HTML",
+        _ => "PNG",
+    }
+}
+
+// The save dialog's default name is the only renderer-influenced string left
+// in the export flow, so it is reduced to a safe file-name charset first.
+fn sanitize_report_file_stem(value: &str) -> String {
+    let stem: String = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-' || *character == '_')
+        .take(64)
+        .collect();
+    if stem.is_empty() {
+        "StudyPulse-Report".into()
+    } else {
+        stem
+    }
+}
+
+// Validates a dialog-confirmed destination: the host-fixed extension is kept
+// or appended, the parent directory must exist, and the result must stay
+// outside the active Workspace data directory.
+fn report_destination(picked: &Path, extension: &str, workspace_root: Option<&str>) -> Result<PathBuf, AppError> {
+    let name = picked
+        .file_name()
+        .ok_or_else(|| AppError::InvalidInput { message: "report path has no file name".into() })?;
+    let extension_matches = Path::new(name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case(extension))
+        == Some(true);
+    let name = if extension_matches {
+        name.to_owned()
+    } else {
+        std::ffi::OsString::from(format!("{}.{}", name.to_string_lossy(), extension))
+    };
+    let parent = picked
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput { message: "report path has no parent directory".into() })?;
     let parent = parent.canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
-    let candidate = parent.join(candidate.file_name().expect("checked above"));
-    if let Some(workspace) = state.core.current_workspace() {
-        let root = Path::new(&workspace.root_path).canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
-        if candidate.starts_with(root) {
+    let candidate = parent.join(name);
+    if let Some(root) = workspace_root {
+        let root = Path::new(root).canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
+        if candidate.starts_with(&root) {
             return Err(AppError::InvalidInput { message: "reports must be saved outside the Workspace data directory".into() });
         }
     }
     Ok(candidate)
 }
 
-#[tauri::command]
-// Text reports use the same destination policy for every supported extension;
-// the host writes only after the path has passed that policy.
-async fn write_report_file(path: String, extension: String, contents: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    let destination = report_destination(&path, &extension, &state)?;
-    fs::write(destination, contents).map_err(|error| AppError::File { message: error.to_string() })
+// Opens the host-owned save dialog and resolves the confirmed path. A
+// cancelled dialog resolves to None and never reaches the write path.
+async fn prompt_report_save_path(
+    app: &tauri::AppHandle,
+    default_file_name: String,
+    extension: &'static str,
+) -> Result<Option<PathBuf>, AppError> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    // The dialog callback delivers exactly one result; a standard channel
+    // keeps that handoff synchronous on the callback side, and the blocking
+    // receive runs off the async runtime's worker threads.
+    let (sender, receiver) = std::sync::mpsc::channel::<Option<FilePath>>();
+    app.dialog()
+        .file()
+        .set_title("Export StudyPulse Report")
+        .add_filter(report_extension_label(extension), &[extension])
+        .set_file_name(default_file_name)
+        .save_file(move |picked| {
+            let _ = sender.send(picked);
+        });
+    let delivered = tauri::async_runtime::spawn_blocking(move || receiver.recv().ok())
+        .await
+        .map_err(|error| AppError::State { message: error.to_string() })?;
+    let Some(picked) = delivered else {
+        return Err(AppError::State { message: "report save dialog closed unexpectedly".into() });
+    };
+    picked
+        .map(|path| path.into_path().map_err(|error| AppError::File { message: error.to_string() }))
+        .transpose()
+}
+
+// Shared export tail: validate the dialog destination, write the bytes, and
+// remember the written path so `share_report` can reopen it without ever
+// accepting a renderer-supplied path.
+async fn export_report_bytes(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    file_stem: &str,
+    extension: &'static str,
+    contents: Vec<u8>,
+) -> Result<Option<String>, AppError> {
+    let Some(picked) = prompt_report_save_path(app, format!("{file_stem}.{extension}"), extension).await? else {
+        return Ok(None);
+    };
+    let workspace_root = state.core.current_workspace().map(|workspace| workspace.root_path);
+    let destination = report_destination(&picked, extension, workspace_root.as_deref())?;
+    fs::write(&destination, contents).map_err(|error| AppError::File { message: error.to_string() })?;
+    if let Ok(mut remembered) = state.last_report_export.lock() {
+        *remembered = Some(destination.clone());
+    }
+    Ok(Some(destination.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
-// Image assets arrive as base64 over the command boundary. Decode and size
-// checks happen before writing so malformed or oversized payloads fail early.
-async fn write_report_asset(path: String, contents_base64: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    let destination = report_destination(&path, "png", &state)?;
+// Text report export: the format is a host-checked enum rather than a wire
+// extension, and the command returns the written path (None when the user
+// cancelled the dialog).
+async fn export_report(
+    format: String,
+    file_stem: String,
+    contents: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    let extension = report_text_extension(&format).ok_or_else(|| AppError::InvalidInput {
+        message: format!("unsupported report format: {format}"),
+    })?;
+    export_report_bytes(&app, &state, &sanitize_report_file_stem(&file_stem), extension, contents.into_bytes()).await
+}
+
+#[tauri::command]
+// Image assets arrive as base64 over the command boundary. The extension is
+// host-pinned to png, and decode, size, and signature checks happen before
+// the dialog opens so malformed or oversized payloads fail early.
+async fn export_report_asset(
+    file_stem: String,
+    contents_base64: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
     let contents = BASE64.decode(contents_base64).map_err(|error| AppError::InvalidInput { message: error.to_string() })?;
     if contents.len() > 20 * 1024 * 1024 {
         return Err(AppError::InvalidInput { message: "report image is too large".into() });
     }
-    fs::write(destination, contents).map_err(|error| AppError::File { message: error.to_string() })
+    if !contents.starts_with(&PNG_SIGNATURE) {
+        return Err(AppError::InvalidInput { message: "report image must be a PNG file".into() });
+    }
+    export_report_bytes(&app, &state, &sanitize_report_file_stem(&file_stem), "png", contents).await
 }
 
 // Report sharing is kept separate from report generation so opening an OS file
 // cannot be triggered as an incidental side effect of data generation.
 #[tauri::command]
-// Sharing accepts an existing regular file but refuses files under the active
-// Workspace, then delegates opening to the platform opener plugin.
-async fn share_report(path: String, state: State<'_, AppState>) -> Result<(), AppError> {
-    let candidate = PathBuf::from(&path);
-    if !candidate.is_file() {
+// Sharing is limited to the report file the host itself exported. The renderer
+// cannot name an arbitrary filesystem path; the remembered destination only
+// ever comes from a host dialog that enforced the Workspace exclusion at
+// write time.
+async fn share_report(state: State<'_, AppState>) -> Result<(), AppError> {
+    let remembered = state
+        .last_report_export
+        .lock()
+        .map(|value| value.clone())
+        .map_err(|_| AppError::State {
+            message: "report export lock poisoned".into(),
+        })?;
+    let Some(path) = remembered else {
+        return Err(AppError::State {
+            message: "no report has been exported in this session".into(),
+        });
+    };
+    if !path.is_file() {
         return Err(AppError::File { message: "report file does not exist".into() });
     }
-    if let Some(workspace) = state.core.current_workspace() {
-        let root = Path::new(&workspace.root_path).canonicalize().map_err(|error| AppError::File { message: error.to_string() })?;
-        if candidate.canonicalize().map_err(|error| AppError::File { message: error.to_string() })?.starts_with(root) {
-            return Err(AppError::InvalidInput { message: "cannot share a Workspace data file as a report".into() });
-        }
-    }
-    tauri_plugin_opener::open_path(&candidate, None::<&str>).map_err(|error| AppError::File {
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(|error| AppError::File {
         message: error.to_string(),
     })?;
     Ok(())
@@ -1378,8 +1512,8 @@ pub fn run() {
             upsert_exam_simulation,
             delete_exam_simulation,
             get_learning_report,
-            write_report_file,
-            write_report_asset,
+            export_report,
+            export_report_asset,
             share_report,
             get_study_sessions,
             delete_study_session,
@@ -1532,5 +1666,56 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    // The wire format string maps onto a fixed extension allowlist. A
+    // compromised renderer must not be able to widen report exports to
+    // arbitrary or executable file types.
+    fn report_text_extension_allows_only_document_formats() {
+        assert_eq!(report_text_extension("md"), Some("md"));
+        assert_eq!(report_text_extension("html"), Some("html"));
+        for rejected in ["png", "exe", "sh", "command", "", "HTML", "md "] {
+            assert_eq!(report_text_extension(rejected), None, "format {rejected:?} must be rejected");
+        }
+    }
+
+    #[test]
+    // The dialog's default name is the only renderer-influenced string left in
+    // the export flow; separators, dots, and non-ASCII characters are dropped
+    // before it reaches the filesystem layer.
+    fn sanitize_report_file_stem_reduces_to_safe_characters() {
+        assert_eq!(sanitize_report_file_stem("StudyPulse-7d"), "StudyPulse-7d");
+        assert_eq!(sanitize_report_file_stem("../../etc/hosts"), "etchosts");
+        assert_eq!(sanitize_report_file_stem("学/习…报/告"), "StudyPulse-Report");
+        assert_eq!(sanitize_report_file_stem(&"x".repeat(200)), "x".repeat(64));
+    }
+
+    #[test]
+    // The destination policy is the last host-side gate before report bytes
+    // are written: extensions are pinned (kept when correct, appended when
+    // missing) and Workspace data paths are refused even for dialog results.
+    fn report_destination_pins_extension_and_refuses_workspace_paths() {
+        let core = studypulse_ffi::StudyPulseCore::new();
+        let directory = tempfile::tempdir().expect("tempdir");
+        let workspace_path = directory.path().join("Workspace");
+        core.create_workspace(workspace_path.to_string_lossy().into_owned())
+            .expect("workspace should be created");
+        let workspace = core.current_workspace().expect("workspace handle");
+
+        let export_dir = directory.path().join("Exports");
+        fs::create_dir_all(&export_dir).expect("export directory");
+
+        let missing = export_dir.join("StudyPulse-7d");
+        let destination = report_destination(&missing, "md", Some(&workspace.root_path)).expect("destination");
+        assert_eq!(destination.file_name().expect("file name"), "StudyPulse-7d.md");
+
+        let uppercase = export_dir.join("Report.MD");
+        let destination = report_destination(&uppercase, "md", None).expect("destination");
+        assert_eq!(destination.file_name().expect("file name"), "Report.MD");
+
+        let inside = workspace_path.join("Data").join("report.md");
+        let error = report_destination(&inside, "md", Some(&workspace.root_path)).expect_err("workspace path must be refused");
+        assert!(matches!(error, AppError::InvalidInput { .. }));
     }
 }

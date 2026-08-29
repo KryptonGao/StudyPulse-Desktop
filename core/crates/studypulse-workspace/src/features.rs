@@ -219,6 +219,32 @@ pub enum CoachProposalStatus {
     Superseded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Caller decision for resolving a Coach proposal.
+pub enum CoachProposalDecision {
+    Approve,
+    Reject,
+}
+
+impl CoachProposalDecision {
+    /// Parse the host-facing decision string exhaustively. The plural aliases
+    /// keep the historical desktop vocabulary working; an unknown value must
+    /// fail loudly instead of silently falling into the reject branch.
+    pub fn parse(value: &str) -> crate::Result<Self> {
+        let normalized = value.to_ascii_lowercase();
+        match normalized.as_str() {
+            "approve" | "approved" => Ok(Self::Approve),
+            "reject" | "rejected" => Ok(Self::Reject),
+            _ => Err(WorkspaceError::MalformedData {
+                path: "resolve_coach_proposal".into(),
+                detail: format!(
+                    "unknown coach proposal decision '{value}': expected approve or reject"
+                ),
+            }),
+        }
+    }
+}
+
 /// iOS stores the full stop-condition object while the first desktop Agent
 /// contract also allowed a short text. Untagged decoding keeps both forms
 /// round-trippable without weakening the enclosing proposal validation.
@@ -1214,8 +1240,16 @@ pub fn proposal_task(
     // Agent can resume the Coach intent without adding ad-hoc task columns.
     // Serialize only after the due date and stop-condition text are normalized.
     let execution = serde_json::json!({ "objective": item.objective, "stopCondition": stop_condition, "coachGoalId": proposal.goal_id, "coachProposalId": proposal.id });
+    // Derive the task id from the (proposal, item) pair instead of drawing a
+    // random UUID: a retried approval after a partially applied write must
+    // re-upsert the same tasks rather than duplicate them. The proposal UUID
+    // is a valid v5 namespace, and item ids are unique within one proposal.
+    let id = Uuid::new_v5(
+        &proposal.id,
+        format!("coach-proposal-item:{}", item.id).as_bytes(),
+    );
     Ok(TaskItem {
-        id: Uuid::new_v4(),
+        id,
         title: item.title.clone(),
         task_type: crate::TaskType::Homework,
         due_date: due.clone(),
@@ -1313,6 +1347,30 @@ mod tests {
         assert_eq!(simulation.duration_seconds, 1_200);
         assert_eq!(simulation.status, ExamSimulationStatus::Preparing);
         assert!(simulation.questions.is_empty());
+    }
+
+    #[test]
+    // Decision parsing is exhaustive: unknown values must error instead of
+    // silently falling into the reject branch of a proposal resolution.
+    fn coach_proposal_decision_parse_is_strict() {
+        assert_eq!(
+            CoachProposalDecision::parse("approve").unwrap(),
+            CoachProposalDecision::Approve
+        );
+        assert_eq!(
+            CoachProposalDecision::parse("APPROVED").unwrap(),
+            CoachProposalDecision::Approve
+        );
+        assert_eq!(
+            CoachProposalDecision::parse("reject").unwrap(),
+            CoachProposalDecision::Reject
+        );
+        assert_eq!(
+            CoachProposalDecision::parse("Rejected").unwrap(),
+            CoachProposalDecision::Reject
+        );
+        assert!(CoachProposalDecision::parse("maybe").is_err());
+        assert!(CoachProposalDecision::parse("").is_err());
     }
 
     #[test]

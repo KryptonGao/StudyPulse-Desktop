@@ -1341,6 +1341,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1427,7 +1433,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "studypulse-agent"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1446,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-ffi"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1468,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-model-client"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1481,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-runner"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1491,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-tools"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -1508,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "studypulse-workspace"
-version = "0.11.1"
+version = "0.12.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1964,6 +1970,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

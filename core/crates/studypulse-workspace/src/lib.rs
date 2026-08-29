@@ -31,9 +31,9 @@ pub use backup::{
 pub use features::{
     AiActionApplication, AiFeatureRecord, CoachAnalysis, CoachAnalysisResponse, CoachChat,
     CoachConversationMessage, CoachData, CoachDataRow, CoachEvidence, CoachGoal, CoachGoalStatus,
-    CoachGoalSubject, CoachPrediction, CoachProposal, CoachProposalItem, CoachProposalStatus,
-    CoachRisk, CoachStopCondition, DailyExamTask, DailyReportPoint, ExamGoal, ExamGradeResponse,
-    ExamPlan, ExamPlanPhase, ExamQuestion, ExamQuestionKind, ExamQuestionRecord,
+    CoachGoalSubject, CoachPrediction, CoachProposal, CoachProposalDecision, CoachProposalItem,
+    CoachProposalStatus, CoachRisk, CoachStopCondition, DailyExamTask, DailyReportPoint, ExamGoal,
+    ExamGradeResponse, ExamPlan, ExamPlanPhase, ExamQuestion, ExamQuestionKind, ExamQuestionRecord,
     ExamQuestionResult, ExamRoleAnalysis, ExamSimulation, ExamSimulationEvent,
     ExamSimulationEventKind, ExamSimulationStatus, ExamWeakPoint, LearningReport,
     ReversePlannerResponse, coach_row_payload, decode_coach_payload, default_simulation, expired,
@@ -86,6 +86,10 @@ pub enum WorkspaceError {
     /// The caller attempted to apply/cancel a cleaned staging session.
     #[error("backup import session was not found")]
     ImportSessionNotFound,
+    /// A merge restore's resolutions did not exactly cover the conflicts the
+    /// inspection reported, so applying them would silently decide one side.
+    #[error("restore resolutions do not match inspection conflicts: {0}")]
+    ResolutionMismatch(String),
     /// Underlying filesystem failure, kept separate from malformed data.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

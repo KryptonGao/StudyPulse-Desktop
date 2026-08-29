@@ -26,14 +26,14 @@ use studypulse_workspace::{
     AgentMessage, AgentMessageRole, AgentNotebook, AgentTurn as WorkspaceAgentTurn,
     AiActionApplication, AiFeatureRecord, BackupExportOptions, BackupInspection, BackupResolution,
     CoachAnalysis, CoachChat, CoachConversationMessage, CoachGoal, CoachProposal,
-    ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation, ExamChecklistItem, ExamFull, ExamGoal,
-    ExamPlan, ExamReview, ExamSimulation, ExamTimeSlot, FileEntry, GoalReward, Grade,
-    HandwritingAnswerEntry, HeartRateSample, ImportReport, InvestmentTarget, MasteryHistoryEntry,
-    MistakeNoteFull, PhaseGoal, RestoreMode, ReviewState, Routine, RoutineInstance, RoutineType,
-    SafeRelativePath, SearchMatch, SessionIntensity, StudyPhase, StudySession, StudySessionSource,
-    SubTask, Subject, TaskItem, TaskType, TimeInvestmentSubject, TimeInvestmentSummary,
-    TimeInvestmentTheme, TodaySnapshot, TrendsSnapshot, Workspace, WorkspaceInfo,
-    default_simulation, expired, parse_structured_json, proposal_task,
+    CoachProposalDecision, ComprehensiveExamFull, DiaryEntry, DifficultyAnnotation,
+    ExamChecklistItem, ExamFull, ExamGoal, ExamPlan, ExamReview, ExamSimulation, ExamTimeSlot,
+    FileEntry, GoalReward, Grade, HandwritingAnswerEntry, HeartRateSample, ImportReport,
+    InvestmentTarget, MasteryHistoryEntry, MistakeNoteFull, PhaseGoal, RestoreMode, ReviewState,
+    Routine, RoutineInstance, RoutineType, SafeRelativePath, SearchMatch, SessionIntensity,
+    StudyPhase, StudySession, StudySessionSource, SubTask, Subject, TaskItem, TaskType,
+    TimeInvestmentSubject, TimeInvestmentSummary, TimeInvestmentTheme, TodaySnapshot,
+    TrendsSnapshot, Workspace, WorkspaceInfo, default_simulation, parse_structured_json,
 };
 use thiserror::Error;
 
@@ -1633,7 +1633,7 @@ impl StudyPulseCore {
             "suggestions" => workspace.upsert_study_suggestion(record.clone()),
             "dailyPlans" => workspace.upsert_daily_ai_plan(record.clone()),
             "predictions" => workspace.upsert_score_prediction(record.clone()),
-            _ => unreachable!(),
+            _ => return Err(CoreError::message("unknown Phase 3 record collection")),
         }
         .map_err(CoreError::message)?;
         serde_json::to_string(&results).map_err(CoreError::message)
@@ -2360,72 +2360,18 @@ impl StudyPulseCore {
         decision: String,
         expected_goal_version: i64,
     ) -> Result<Vec<String>, CoreError> {
-        // Proposal resolution is an optimistic-concurrency boundary: goal and
-        // proposal versions must match, expiry is persisted, and approval turns
-        // validated proposal items into tasks only after all checks pass.
-        let workspace = self.workspace()?;
-        let mut data = workspace.read_coach_data().map_err(CoreError::message)?;
+        // Decision parsing is exhaustive so an unknown value fails here instead
+        // of silently rejecting the proposal. The workspace performs the whole
+        // resolution (version/status checks, task creation, status transition)
+        // as one locked transaction, so concurrent approvals and retried
+        // approvals cannot duplicate the created tasks.
+        let decision = CoachProposalDecision::parse(&decision).map_err(CoreError::message)?;
         let proposal_id = parse_uuid(&proposal_id)?;
-        let index = data
-            .proposals
-            .iter()
-            .position(|value| value.id == proposal_id)
-            .ok_or_else(|| CoreError::message("coach proposal not found"))?;
-        let proposal = data.proposals[index].clone();
-        let goal = data
-            .goals
-            .iter()
-            .find(|value| value.id == proposal.goal_id)
-            .ok_or_else(|| CoreError::message("coach goal not found"))?;
-        if goal.version != expected_goal_version || proposal.goal_version != expected_goal_version {
-            return Err(CoreError::message("coach proposal version is stale"));
-        }
-        if !matches!(
-            proposal.status,
-            studypulse_workspace::CoachProposalStatus::Pending
-        ) {
-            return Err(CoreError::message("coach proposal is no longer pending"));
-        }
-        if expired(&proposal.expires_at) {
-            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Expired;
-            data.proposals[index].resolved_at = Some(chrono::Utc::now().to_rfc3339());
-            workspace
-                .write_coach_data(&data)
-                .map_err(CoreError::message)?;
-            return Err(CoreError::message("coach proposal has expired"));
-        }
-        let approved =
-            decision.eq_ignore_ascii_case("approve") || decision.eq_ignore_ascii_case("approved");
-        let now = chrono::Utc::now().to_rfc3339();
-        if approved {
-            let tasks: Vec<_> = proposal
-                .items
-                .iter()
-                .map(|item| proposal_task(&proposal, item))
-                .collect::<std::result::Result<_, _>>()
-                .map_err(CoreError::message)?;
-            for task in &tasks {
-                task.validate().map_err(CoreError::message)?;
-            }
-            for task in &tasks {
-                workspace
-                    .upsert_task(task.clone())
-                    .map_err(CoreError::message)?;
-            }
-            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Approved;
-            data.proposals[index].resolved_at = Some(now);
-            workspace
-                .write_coach_data(&data)
-                .map_err(CoreError::message)?;
-            Ok(tasks.into_iter().map(|task| task.id.to_string()).collect())
-        } else {
-            data.proposals[index].status = studypulse_workspace::CoachProposalStatus::Rejected;
-            data.proposals[index].resolved_at = Some(now);
-            workspace
-                .write_coach_data(&data)
-                .map_err(CoreError::message)?;
-            Ok(Vec::new())
-        }
+        let task_ids = self
+            .workspace()?
+            .resolve_coach_proposal(proposal_id, decision, expected_goal_version)
+            .map_err(CoreError::message)?;
+        Ok(task_ids.into_iter().map(|id| id.to_string()).collect())
     }
 
     pub fn get_exam_goals_json(&self) -> Result<Vec<String>, CoreError> {
@@ -3272,7 +3218,12 @@ impl StudyPulseCore {
                     .ok_or_else(|| CoreError::message("exam not found"))?;
                 json!({"examId":id,"examName":exam.name,"subject":exam.subject,"context":common})
             }
-            _ => unreachable!(),
+            _ => {
+                return Err(CoreError::message(format!(
+                    "no AI feature hydration is defined for caller {:?}",
+                    request.caller
+                )));
+            }
         };
         request.input_json = serde_json::to_string(&input).map_err(CoreError::message)?;
         Ok(request)

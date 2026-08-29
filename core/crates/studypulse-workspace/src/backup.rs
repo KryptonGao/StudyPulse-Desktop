@@ -237,6 +237,13 @@ impl Workspace {
         if !inspection.staging_path.exists() {
             return Err(WorkspaceError::ImportSessionNotFound);
         }
+        if mode == RestoreMode::Merge {
+            // Merge decisions must exactly cover the conflicts the inspection
+            // reported. A partial or stale list would silently default an
+            // undecided conflict to one side, so this fails closed before any
+            // recovery copy or staging work happens.
+            validate_merge_resolutions(&inspection.conflicts, resolutions)?;
+        }
         // Keep reads/upserts from racing the recovery snapshot or the final
         // directory exchange.
         let _guard = self.exclusive_write();
@@ -1398,6 +1405,63 @@ fn compare_media(
     Ok(())
 }
 
+/// Merge apply requires decisions for exactly the conflicts the inspection
+/// reported. A missing decision would otherwise default a conflict to one
+/// side, a stale key would silently do nothing, and a duplicate entry makes
+/// the caller's intent ambiguous — all three fail closed here.
+fn validate_merge_resolutions(
+    conflicts: &[BackupConflict],
+    resolutions: &[BackupResolution],
+) -> Result<()> {
+    let conflict_keys: HashSet<&str> = conflicts
+        .iter()
+        .map(|conflict| conflict.key.as_str())
+        .collect();
+    let mut decided: HashSet<&str> = HashSet::with_capacity(resolutions.len());
+    let mut unknown: Vec<&str> = Vec::new();
+    for resolution in resolutions {
+        if !conflict_keys.contains(resolution.conflict_key.as_str()) {
+            unknown.push(resolution.conflict_key.as_str());
+        }
+        decided.insert(resolution.conflict_key.as_str());
+    }
+    let missing: Vec<&str> = conflict_keys.difference(&decided).copied().collect();
+    let duplicated = decided.len() != resolutions.len();
+    if missing.is_empty() && unknown.is_empty() && !duplicated {
+        return Ok(());
+    }
+    let mut details = Vec::new();
+    if !missing.is_empty() {
+        details.push(format!("no decision for [{}]", summarize_keys(missing)));
+    }
+    if !unknown.is_empty() {
+        details.push(format!(
+            "not reported by inspection [{}]",
+            summarize_keys(unknown)
+        ));
+    }
+    if duplicated {
+        details.push("duplicate entries for the same conflict key".to_string());
+    }
+    Err(WorkspaceError::ResolutionMismatch(details.join("; ")))
+}
+
+/// Deterministic, bounded key listing so a caller mistake stays readable even
+/// with hundreds of unresolved conflicts.
+fn summarize_keys(mut keys: Vec<&str>) -> String {
+    const LIMIT: usize = 5;
+    keys.sort_unstable();
+    if keys.len() <= LIMIT {
+        keys.join(", ")
+    } else {
+        format!(
+            "{}, ... and {} more",
+            keys[..LIMIT].join(", "),
+            keys.len() - LIMIT
+        )
+    }
+}
+
 fn merge_data(
     incoming: &Path,
     target: &Path,
@@ -1430,11 +1494,19 @@ fn merge_data(
                 // Resolution keys include the domain to avoid collisions between
                 // identical UUID strings in different files.
                 let conflict_key = format!("{domain}:{key}");
-                if local.contains_key(&key)
-                    && resolutions
-                        .get(conflict_key.as_str())
-                        .is_some_and(|value| !*value)
-                {
+                // An explicit decision keeps or replaces regardless of content.
+                // Without one, only a record that really differs locally needs
+                // a decision; a conflict that appeared after inspection (local
+                // data changed between inspect and apply) defaults to keeping
+                // the local record instead of silently losing it.
+                let keep_local = match resolutions.get(conflict_key.as_str()) {
+                    Some(use_incoming) => !*use_incoming && local.contains_key(&key),
+                    None => match local.get(&key) {
+                        Some(existing) => existing != &value,
+                        None => false,
+                    },
+                };
+                if keep_local {
                     kept += 1;
                 } else {
                     local.insert(key, value);
@@ -1446,11 +1518,14 @@ fn merge_data(
             write_jsonl_map(&destination, local)?;
         } else {
             let conflict_key = format!("{domain}:singleton");
-            if destination.exists()
-                && resolutions
-                    .get(conflict_key.as_str())
-                    .is_some_and(|value| !*value)
-            {
+            // Identical bytes need no decision; differing bytes with no
+            // decision are an after-inspection conflict and keep the local
+            // file rather than silently overwriting it.
+            let keep_local = match resolutions.get(conflict_key.as_str()) {
+                Some(use_incoming) => !*use_incoming && destination.exists(),
+                None => destination.exists() && fs::read(&source)? != fs::read(&destination)?,
+            };
+            if keep_local {
                 kept += 1;
             } else {
                 fs::copy(source, destination)?;
@@ -1462,8 +1537,9 @@ fn merge_data(
 }
 
 fn merge_media(incoming: &Path, target: &Path, resolutions: &HashMap<&str, bool>) -> Result<()> {
-    // Media conflicts use `media:<relative path>` keys and are copied only when
-    // the caller accepted incoming bytes or the local file is absent.
+    // Media conflicts use `media:<relative path>` keys; the local file stays in
+    // place when the caller declined incoming bytes, or when local bytes
+    // changed after inspection and no decision covers them.
     if !incoming.exists() {
         return Ok(());
     }
@@ -1480,12 +1556,15 @@ fn merge_media(incoming: &Path, target: &Path, resolutions: &HashMap<&str, bool>
         let destination = target.join(relative);
         let wire = relative.to_string_lossy().replace('\\', "/");
         let conflict_key = format!("media:{wire}");
-        if destination.exists()
-            && resolutions
-                .get(conflict_key.as_str())
-                .is_some_and(|value| !*value)
-        {
-            // An explicit local decision leaves the staged incoming file unused.
+        // Hash comparison keeps identical media copying (no decision needed)
+        // while a post-inspection conflict defaults to keeping local bytes.
+        let keep_local = match resolutions.get(conflict_key.as_str()) {
+            Some(use_incoming) => !*use_incoming && destination.exists(),
+            None => {
+                destination.exists() && sha256_file(entry.path())? != sha256_file(&destination)?
+            }
+        };
+        if keep_local {
             continue;
         }
         if let Some(parent) = destination.parent() {
@@ -1845,6 +1924,349 @@ mod tests {
         assert_eq!(
             destination.read_media("images/round-trip.bin").unwrap(),
             b"media"
+        );
+    }
+
+    fn task_with(id: Uuid, title: &str) -> TaskItem {
+        let timestamp = "2026-07-31T12:00:00Z".to_string();
+        TaskItem {
+            id,
+            title: title.into(),
+            task_type: crate::TaskType::Homework,
+            due_date: timestamp.clone(),
+            reminder_date: timestamp.clone(),
+            subject: "Math".into(),
+            importance: 3,
+            notes: String::new(),
+            is_completed: false,
+            reminder_event_id: None,
+            reminder_calendar_id: None,
+            created_at: timestamp,
+            phase_id: None,
+            coach_execution_data: None,
+            coach_goal_id: None,
+            coach_proposal_id: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn export_archive(workspace: &Workspace, directory: &Path, name: &str) -> PathBuf {
+        let exported = workspace
+            .export_backup(
+                directory.join(name),
+                BackupExportOptions {
+                    includes_media: true,
+                    includes_derived_health_data: false,
+                    app_version: "test".into(),
+                    app_build: "test".into(),
+                    locale: "en_US".into(),
+                },
+            )
+            .unwrap();
+        PathBuf::from(exported.archive_path)
+    }
+
+    // Identical singleton JSON files are copied and counted as imported, so
+    // record-level count assertions must add them on top of JSONL records.
+    fn staged_singleton_count(inspection: &BackupInspection) -> u64 {
+        fs::read_dir(inspection.staging_path.join("data"))
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension != "jsonl")
+            })
+            .count() as u64
+    }
+
+    // One decision per inspection conflict; `accept` picks the incoming side.
+    fn resolutions_for(
+        inspection: &BackupInspection,
+        accept: impl Fn(&str) -> bool,
+    ) -> Vec<BackupResolution> {
+        inspection
+            .conflicts
+            .iter()
+            .map(|conflict| BackupResolution {
+                conflict_key: conflict.key.clone(),
+                use_incoming: accept(&conflict.key),
+            })
+            .collect()
+    }
+
+    #[test]
+    // Merge honors per-conflict decisions: declined records keep local
+    // content, accepted records take incoming bytes, and records inspection
+    // reported as added are imported without needing a decision.
+    fn merge_applies_explicit_resolutions_record_by_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Workspace::create(temp.path().join("Source")).unwrap();
+        let conflicting_id = Uuid::new_v4();
+        let added_id = Uuid::new_v4();
+        source
+            .append_task(task_with(conflicting_id, "Incoming title"))
+            .unwrap();
+        source
+            .append_task(task_with(added_id, "Backup only"))
+            .unwrap();
+        source
+            .write_media("images/shared.bin", b"incoming")
+            .unwrap();
+        source.write_media("images/new.bin", b"new").unwrap();
+        let archive = export_archive(&source, temp.path(), "merge.studypulsebackup");
+
+        let destination = Workspace::create(temp.path().join("Destination")).unwrap();
+        destination
+            .append_task(task_with(conflicting_id, "Local title"))
+            .unwrap();
+        destination
+            .write_media("images/shared.bin", b"local")
+            .unwrap();
+
+        let inspection = destination.inspect_backup(archive).unwrap();
+        // Fresh workspaces also report dynamically seeded singleton JSON as
+        // conflicting; only the task and media keys matter for this test.
+        for expected in [
+            format!("tasks:{conflicting_id}"),
+            "media:images/shared.bin".into(),
+        ] {
+            assert!(
+                inspection
+                    .conflicts
+                    .iter()
+                    .any(|conflict| conflict.key == expected)
+            );
+        }
+
+        // Decline the task conflict and accept every other one. The singleton
+        // count is read before apply because a successful apply clears the
+        // inspection staging directory.
+        let singleton_count = staged_singleton_count(&inspection);
+        let report = destination
+            .apply_backup(
+                &inspection,
+                RestoreMode::Merge,
+                &resolutions_for(&inspection, |key| !key.starts_with("tasks:")),
+            )
+            .unwrap();
+
+        assert_eq!(report.imported_records, 1 + singleton_count);
+        assert_eq!(report.kept_local_records, 1);
+        let tasks = destination.read_tasks().unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == conflicting_id)
+                .unwrap()
+                .title,
+            "Local title"
+        );
+        assert!(tasks.iter().any(|task| task.id == added_id));
+        assert_eq!(
+            destination.read_media("images/shared.bin").unwrap(),
+            b"incoming"
+        );
+        assert_eq!(destination.read_media("images/new.bin").unwrap(), b"new");
+    }
+
+    #[test]
+    // A merge with any inspection conflict left undecided fails closed before
+    // any recovery copy or swap happens, leaving local data exactly as it was.
+    fn merge_fails_closed_when_a_conflict_has_no_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Workspace::create(temp.path().join("Source")).unwrap();
+        let conflicting_id = Uuid::new_v4();
+        let added_id = Uuid::new_v4();
+        source
+            .append_task(task_with(conflicting_id, "Incoming title"))
+            .unwrap();
+        source
+            .append_task(task_with(added_id, "Backup only"))
+            .unwrap();
+        source
+            .write_media("images/shared.bin", b"incoming")
+            .unwrap();
+        let archive = export_archive(&source, temp.path(), "merge.studypulsebackup");
+
+        let destination = Workspace::create(temp.path().join("Destination")).unwrap();
+        destination
+            .append_task(task_with(conflicting_id, "Local title"))
+            .unwrap();
+        destination
+            .write_media("images/shared.bin", b"local")
+            .unwrap();
+
+        let inspection = destination.inspect_backup(archive).unwrap();
+        let error = destination
+            .apply_backup(
+                &inspection,
+                RestoreMode::Merge,
+                &[BackupResolution {
+                    conflict_key: "media:images/shared.bin".into(),
+                    use_incoming: true,
+                }],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no decision for"));
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("tasks:{conflicting_id}"))
+        );
+
+        // A rejected apply leaves no recovery snapshot behind.
+        assert!(
+            fs::read_dir(destination.root().join(".studypulse/recovery"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        let tasks = destination.read_tasks().unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.id == conflicting_id)
+                .unwrap()
+                .title,
+            "Local title"
+        );
+        assert!(!tasks.iter().any(|task| task.id == added_id));
+        assert_eq!(
+            destination.read_media("images/shared.bin").unwrap(),
+            b"local"
+        );
+    }
+
+    #[test]
+    // Resolution keys the inspection never reported — and duplicated entries —
+    // are caller bugs rather than decisions, so merge refuses them instead of
+    // silently ignoring them.
+    fn merge_rejects_unknown_and_duplicate_resolution_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = Workspace::create(temp.path().join("Source")).unwrap();
+        let conflicting_id = Uuid::new_v4();
+        source
+            .append_task(task_with(conflicting_id, "Incoming title"))
+            .unwrap();
+        source
+            .write_media("images/shared.bin", b"incoming")
+            .unwrap();
+        let archive = export_archive(&source, temp.path(), "merge.studypulsebackup");
+
+        let destination = Workspace::create(temp.path().join("Destination")).unwrap();
+        destination
+            .append_task(task_with(conflicting_id, "Local title"))
+            .unwrap();
+        destination
+            .write_media("images/shared.bin", b"local")
+            .unwrap();
+        let inspection = destination.inspect_backup(archive).unwrap();
+
+        let mut resolutions = resolutions_for(&inspection, |_| true);
+        resolutions.push(BackupResolution {
+            conflict_key: "tasks:bogus-key".into(),
+            use_incoming: false,
+        });
+        let error = destination
+            .apply_backup(&inspection, RestoreMode::Merge, &resolutions)
+            .unwrap_err();
+        assert!(error.to_string().contains("not reported by inspection"));
+        assert!(error.to_string().contains("tasks:bogus-key"));
+
+        let mut duplicated = resolutions_for(&inspection, |_| true);
+        duplicated.push(BackupResolution {
+            conflict_key: format!("tasks:{conflicting_id}"),
+            use_incoming: false,
+        });
+        let error = destination
+            .apply_backup(&inspection, RestoreMode::Merge, &duplicated)
+            .unwrap_err();
+        assert!(error.to_string().contains("duplicate entries"));
+    }
+
+    #[test]
+    // Data that changes locally between inspect and apply creates conflicts
+    // the resolution list cannot know about; merge keeps those local records
+    // instead of silently overwriting them with stale incoming content.
+    fn merge_keeps_local_records_that_conflict_after_inspection() {
+        let temp = tempfile::tempdir().unwrap();
+        let drifting_id = Uuid::new_v4();
+        let added_id = Uuid::new_v4();
+
+        // The destination writes the shared record first and the source's
+        // JSONL is seeded from it: record envelopes carry write-time update
+        // timestamps, so this is the only way both hold byte-identical bytes
+        // and inspection reports no conflict for the record.
+        let destination = Workspace::create(temp.path().join("Destination")).unwrap();
+        destination
+            .append_task(task_with(drifting_id, "Same at inspection"))
+            .unwrap();
+        destination
+            .write_media("images/drift.bin", b"same")
+            .unwrap();
+
+        let source = Workspace::create(temp.path().join("Source")).unwrap();
+        fs::copy(
+            destination.root().join("Data/tasks.jsonl"),
+            source.root().join("Data/tasks.jsonl"),
+        )
+        .unwrap();
+        source
+            .append_task(task_with(added_id, "Backup only"))
+            .unwrap();
+        source.write_media("images/drift.bin", b"same").unwrap();
+        let archive = export_archive(&source, temp.path(), "drift.studypulsebackup");
+
+        let inspection = destination.inspect_backup(archive).unwrap();
+        // Only dynamically seeded singleton JSON conflicts; the drifted task
+        // and media files were identical at inspection time.
+        assert!(
+            inspection
+                .conflicts
+                .iter()
+                .all(|conflict| !conflict.key.starts_with("tasks:")
+                    && !conflict.key.starts_with("media:"))
+        );
+
+        destination
+            .upsert_task(task_with(drifting_id, "Edited locally"))
+            .unwrap();
+        destination
+            .write_media("images/drift.bin", b"edited")
+            .unwrap();
+
+        let singleton_count = staged_singleton_count(&inspection);
+        let report = destination
+            .apply_backup(
+                &inspection,
+                RestoreMode::Merge,
+                &resolutions_for(&inspection, |_| true),
+            )
+            .unwrap();
+        assert_eq!(report.imported_records, 1 + singleton_count);
+        assert_eq!(report.kept_local_records, 1);
+        assert_eq!(
+            destination
+                .read_tasks()
+                .unwrap()
+                .iter()
+                .find(|task| task.id == drifting_id)
+                .unwrap()
+                .title,
+            "Edited locally"
+        );
+        assert!(
+            destination
+                .read_tasks()
+                .unwrap()
+                .iter()
+                .any(|task| task.id == added_id)
+        );
+        assert_eq!(
+            destination.read_media("images/drift.bin").unwrap(),
+            b"edited"
         );
     }
 }
