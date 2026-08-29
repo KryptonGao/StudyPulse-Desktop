@@ -2067,10 +2067,20 @@ impl AgentRuntime {
         // All terminal exits converge here, including cancellation, provider
         // failure, and the loop cap.  Centralization prevents one exit path
         // from forgetting to clear the active-run guard or wake pollers.
-        // Terminal cleanup is centralized: update status, append the terminal
-        // event, release the single-active slot, and wake any event/consent
-        // waiter that may still be observing the run.
+        // Terminal cleanup is centralized: update status, release the
+        // single-active slot, append the terminal event, and wake any
+        // event/consent waiter that may still be observing the run.
         *control.status.lock() = status;
+        {
+            // The slot is released before the terminal transition becomes
+            // observable: once run_status reports a terminal status or the
+            // terminal event is delivered, a caller that immediately starts
+            // the next run must not race into AgentError::Busy.
+            let mut state = self.state.lock();
+            if state.active_run.as_deref() == Some(&control.run_id) {
+                state.active_run = None;
+            }
+        }
         let usage_json = serde_json::to_string(&*control.usage.lock()).ok();
         self.emit(
             control,
@@ -2146,10 +2156,6 @@ impl AgentRuntime {
                 ..EventFields::default()
             },
         );
-        let mut state = self.state.lock();
-        if state.active_run.as_deref() == Some(&control.run_id) {
-            state.active_run = None;
-        }
         control.events_changed.notify_all();
         control.confirmation_changed.notify_all();
     }
