@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { core, chooseReportExportPath } from "../lib/core";
+import { core } from "../lib/core";
 import { useI18n } from "../i18n";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ConfirmDialog";
@@ -219,22 +219,21 @@ export function ReportsPage() {
   async function exportText(extension: "md" | "html") {
     if (!report) return;
     try {
-      const path = await chooseReportExportPath(`StudyPulse-${range}d.${extension}`, t("reports.export"));
-      if (!path) return;
-      await core.writeReportFile(path, extension, extension === "md" ? reportMarkdown(report) : reportHtml(report));
-      setLastPath(path);
+      // The host opens the save dialog and owns the destination; a null result
+      // means the user cancelled and nothing was written.
+      const savedPath = await core.exportReport(extension, `StudyPulse-${range}d`, extension === "md" ? reportMarkdown(report) : reportHtml(report));
+      if (!savedPath) return;
+      setLastPath(savedPath);
       showToast(t("backup.exported"), "success");
     } catch (error) {
       showToast(errorText(error), "error");
     }
   }
-  // PNG export follows a browser-only SVG -> canvas conversion, then sends the
-  // resulting base64 asset through the same Tauri file boundary as text export.
+  // PNG export follows a browser-only SVG -> canvas conversion; the file name
+  // and destination are decided by the host save dialog, not the renderer.
   async function exportPng() {
     if (!report) return;
     try {
-      const path = await chooseReportExportPath(`StudyPulse-${range}d.png`, t("reports.export"));
-      if (!path) return;
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="650"><rect width="100%" height="100%" fill="#f7f4ec"/><text x="60" y="80" font-family="system-ui" font-size="38" fill="#24332f">StudyPulse ${range}-day report</text><text x="60" y="135" font-family="system-ui" font-size="22" fill="#55736b">${report.fromDate} → ${report.toDate}</text><text x="60" y="210" font-family="system-ui" font-size="28" fill="#24332f">Study ${report.totalStudyMinutes} min · ${report.sessionCount} sessions</text>${report.dailyStudyMinutes.map((value, index) => `<rect x="60" y="${280 + index * 22}" width="${Math.min(800, value.studyMinutes * 4)}" height="14" rx="7" fill="#86a99c"/><text x="875" y="${292 + index * 22}" font-family="system-ui" font-size="12" fill="#55736b">${value.date.slice(5)}</text>`).join("")}</svg>`;
       const dataBase64 = await new Promise<string>((resolve, reject) => {
         const image = new Image();
@@ -256,8 +255,9 @@ export function ReportsPage() {
         };
         image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
       });
-      await core.writeReportAsset(path, dataBase64);
-      setLastPath(path);
+      const savedPath = await core.exportReportAsset(`StudyPulse-${range}d`, dataBase64);
+      if (!savedPath) return;
+      setLastPath(savedPath);
       showToast(t("backup.exported"), "success");
     } catch (error) {
       showToast(errorText(error), "error");
@@ -267,7 +267,8 @@ export function ReportsPage() {
   async function shareReport() {
     if (!lastPath) return;
     try {
-      await core.shareReport(lastPath);
+      // The host reopens the file it exported itself; no path crosses the wire.
+      await core.shareReport();
     } catch (error) {
       showToast(errorText(error), "error");
     }

@@ -2699,16 +2699,6 @@ input[type="range"] {
   gap: var(--space-3);
 }
 
-.visualization-svg {
-  max-width: 100%;
-  overflow: auto;
-}
-
-.visualization-svg svg {
-  width: 100%;
-  height: auto;
-}
-
 .agent-structured-result iframe {
   width: 100%;
   min-height: 320px;

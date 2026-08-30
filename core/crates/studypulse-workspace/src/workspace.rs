@@ -31,11 +31,12 @@ use walkdir::WalkDir;
 
 use crate::{
     AgentNotebook, AgentTurn, AiFeatureRecord, CoachAnalysis, CoachChat, CoachConversationMessage,
-    CoachData, CoachDataRow, CoachGoal, CoachProposal, ComprehensiveExamFull, DiaryEntry, ExamFull,
-    ExamGoal, ExamPlan, ExamSimulation, FileEntry, GoalReward, Grade, IosRecord, MistakeNoteFull,
-    Result, Routine, RoutineInstance, SafeRelativePath, SearchMatch, StudyPhase, StudySession,
-    SubTask, Subject, TaskItem, TimeInvestmentSubject, WorkspaceError, WorkspaceInfo,
-    decode_coach_payload, learning_report, make_coach_row, platform::is_link_like,
+    CoachData, CoachDataRow, CoachGoal, CoachProposal, CoachProposalDecision, CoachProposalStatus,
+    ComprehensiveExamFull, DiaryEntry, ExamFull, ExamGoal, ExamPlan, ExamSimulation, FileEntry,
+    GoalReward, Grade, IosRecord, MistakeNoteFull, Result, Routine, RoutineInstance,
+    SafeRelativePath, SearchMatch, StudyPhase, StudySession, SubTask, Subject, TaskItem,
+    TimeInvestmentSubject, WorkspaceError, WorkspaceInfo, decode_coach_payload, expired,
+    learning_report, make_coach_row, platform::is_link_like, proposal_task,
     safe_path::ensure_no_symlink_components,
 };
 
@@ -1128,6 +1129,84 @@ impl Workspace {
         self.write_coach_data_locked(data)
     }
 
+    /// Resolve a Coach proposal as one locked read-modify-write. Version,
+    /// status, and expiry checks re-read `coach_data.jsonl` under the write
+    /// lock, so two concurrent resolutions of the same proposal cannot both
+    /// pass validation. Approvals create the proposal tasks and persist the
+    /// Approved status in the same critical section: a write that fails after
+    /// some tasks were stored leaves the proposal pending, and the retried
+    /// approval re-upserts identical task UUIDs (derived deterministically in
+    /// `proposal_task`) instead of duplicating them.
+    pub fn resolve_coach_proposal(
+        &self,
+        proposal_id: Uuid,
+        decision: CoachProposalDecision,
+        expected_goal_version: i64,
+    ) -> Result<Vec<Uuid>> {
+        let _guard = self.inner.write_lock.lock();
+        let mut data = self.read_coach_data()?;
+        let index = data
+            .proposals
+            .iter()
+            .position(|value| value.id == proposal_id)
+            .ok_or_else(|| coach_resolution_error("coach proposal not found"))?;
+        let proposal = data.proposals[index].clone();
+        let goal = data
+            .goals
+            .iter()
+            .find(|value| value.id == proposal.goal_id)
+            .ok_or_else(|| coach_resolution_error("coach goal not found"))?;
+        if goal.version != expected_goal_version || proposal.goal_version != expected_goal_version {
+            return Err(coach_resolution_error("coach proposal version is stale"));
+        }
+        if proposal.status != CoachProposalStatus::Pending {
+            return Err(coach_resolution_error(
+                "coach proposal is no longer pending",
+            ));
+        }
+        let resolved_at = Utc::now().to_rfc3339();
+        if expired(&proposal.expires_at) {
+            // Expiry is persisted before the error so the UI observes the
+            // transition even though the resolution itself failed.
+            data.proposals[index].status = CoachProposalStatus::Expired;
+            data.proposals[index].resolved_at = Some(resolved_at);
+            data.validate()?;
+            self.write_coach_data_locked(&data)?;
+            return Err(coach_resolution_error("coach proposal has expired"));
+        }
+        match decision {
+            CoachProposalDecision::Approve => {
+                // Validate every derived task before touching tasks.jsonl so a
+                // malformed proposal item cannot leave partial task writes.
+                let tasks = proposal
+                    .items
+                    .iter()
+                    .map(|item| proposal_task(&proposal, item))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                for task in &tasks {
+                    task.validate()?;
+                }
+                for task in &tasks {
+                    self.upsert_jsonl_record_locked("Data/tasks.jsonl", task.clone(), |value| {
+                        value.id
+                    })?;
+                }
+                data.proposals[index].status = CoachProposalStatus::Approved;
+                data.proposals[index].resolved_at = Some(resolved_at);
+                data.validate()?;
+                self.write_coach_data_locked(&data)?;
+                Ok(tasks.into_iter().map(|task| task.id).collect())
+            }
+            CoachProposalDecision::Reject => {
+                data.proposals[index].status = CoachProposalStatus::Rejected;
+                data.proposals[index].resolved_at = Some(resolved_at);
+                data.validate()?;
+                self.write_coach_data_locked(&data)?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
     /// Serialize and publish Coach data while the caller already holds the
     /// Workspace write lock. This keeps aggregate read-modify-write operations
     /// from dropping updates between their read and the final rename.
@@ -1731,6 +1810,15 @@ where
     }
 }
 
+/// Coach proposal resolution failures reuse the typed MalformedData carrier so
+/// the detail keeps the historical message text the desktop UI already shows.
+fn coach_resolution_error(detail: &str) -> WorkspaceError {
+    WorkspaceError::MalformedData {
+        path: "Data/coach_data.jsonl".into(),
+        detail: detail.into(),
+    }
+}
+
 fn system_time_string(value: SystemTime) -> String {
     // File metadata is surfaced as UTC seconds; persisted domain timestamps use
     // their own millisecond helper when exact update ordering matters.
@@ -1770,7 +1858,70 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::{AgentMessage, AgentMessageRole};
+    use crate::{
+        AgentMessage, AgentMessageRole, CoachGoalStatus, CoachGoalSubject, CoachStopCondition,
+    };
+
+    fn coach_goal_fixture() -> CoachGoal {
+        CoachGoal {
+            id: Uuid::new_v4(),
+            title: "Reach algebra target".into(),
+            subjects: vec![CoachGoalSubject {
+                id: Uuid::new_v4(),
+                subject: "Algebra".into(),
+                baseline_score: 60.0,
+                target_score: 80.0,
+                full_score: 100.0,
+                weight: 1.0,
+            }],
+            exam_id: None,
+            comprehensive_exam_id: None,
+            start_date: "2026-08-01".into(),
+            target_date: "2026-09-01".into(),
+            daily_available_minutes: 45,
+            purpose: "Improve fundamentals".into(),
+            constraints: "Weekdays only".into(),
+            status: CoachGoalStatus::Active,
+            version: 1,
+            created_at: "2026-08-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn coach_proposal_fixture(goal: &CoachGoal) -> CoachProposal {
+        CoachProposal {
+            id: Uuid::new_v4(),
+            goal_id: goal.id,
+            goal_version: goal.version,
+            analysis_id: Uuid::new_v4(),
+            conclusion: "Add daily practice".into(),
+            rationale: "Prediction is below the target score".into(),
+            items: vec![crate::CoachProposalItem {
+                id: Uuid::new_v4(),
+                title: "Practice quadratic factoring".into(),
+                subject: "Algebra".into(),
+                start_date: "2026-09-05".into(),
+                objective: "Complete 10 factoring problems".into(),
+                stop_condition: CoachStopCondition::default(),
+                importance: 3,
+            }],
+            status: CoachProposalStatus::Pending,
+            created_at: "2026-08-01T00:00:00Z".into(),
+            expires_at: "2999-01-01T00:00:00Z".into(),
+            resolved_at: None,
+            failure_reason: None,
+            alternative: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn write_coach_fixture(workspace: &Workspace, goal: &CoachGoal, proposal: &CoachProposal) {
+        let mut data = workspace.read_coach_data().unwrap();
+        data.goals.push(goal.clone());
+        data.proposals.push(proposal.clone());
+        workspace.write_coach_data(&data).unwrap();
+    }
 
     #[test]
     // The create/append/read path proves the directory skeleton and the typed
@@ -1810,6 +1961,154 @@ mod tests {
         };
         workspace.append_task(task.clone()).unwrap();
         assert_eq!(workspace.read_tasks().unwrap(), vec![task]);
+    }
+
+    #[test]
+    // Approval must create one validated task per proposal item and persist
+    // the Approved status inside the same locked transaction. Task ids come
+    // from the (proposal, item) pair so retried approvals stay idempotent.
+    fn approve_coach_proposal_creates_tasks_and_marks_approved() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let proposal = coach_proposal_fixture(&goal);
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        let task_ids = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap();
+        assert_eq!(task_ids.len(), proposal.items.len());
+
+        let tasks = workspace.read_tasks().unwrap();
+        assert_eq!(tasks.len(), task_ids.len());
+        for (task, id) in tasks.iter().zip(&task_ids) {
+            assert_eq!(&task.id, id);
+            assert_eq!(task.coach_proposal_id, Some(proposal.id));
+            assert_eq!(task.coach_goal_id, Some(goal.id));
+        }
+        let expected_id = Uuid::new_v5(
+            &proposal.id,
+            format!("coach-proposal-item:{}", proposal.items[0].id).as_bytes(),
+        );
+        assert_eq!(task_ids[0], expected_id);
+
+        let data = workspace.read_coach_data().unwrap();
+        assert_eq!(data.proposals[0].status, CoachProposalStatus::Approved);
+        assert!(data.proposals[0].resolved_at.is_some());
+    }
+
+    #[test]
+    // A second approval must fail on the persisted status instead of creating
+    // another batch of tasks for the same proposal.
+    fn approve_coach_proposal_twice_does_not_duplicate_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let proposal = coach_proposal_fixture(&goal);
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap();
+        let error = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap_err();
+        assert!(error.to_string().contains("no longer pending"), "{error}");
+        assert_eq!(workspace.read_tasks().unwrap().len(), 1);
+    }
+
+    #[test]
+    // A write that lands between task creation and the status update leaves
+    // the proposal pending while tasks are already stored. The retried
+    // approval must reuse the same deterministic task ids, repairing the
+    // half-applied state instead of duplicating tasks.
+    fn retried_coach_proposal_approval_reuses_task_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let proposal = coach_proposal_fixture(&goal);
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        let first_ids = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap();
+
+        // Simulate the crash: tasks exist, the proposal is still pending.
+        let mut data = workspace.read_coach_data().unwrap();
+        data.proposals[0].status = CoachProposalStatus::Pending;
+        data.proposals[0].resolved_at = None;
+        workspace.write_coach_data(&data).unwrap();
+
+        let retried_ids = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap();
+        assert_eq!(retried_ids, first_ids);
+        assert_eq!(workspace.read_tasks().unwrap().len(), first_ids.len());
+        let data = workspace.read_coach_data().unwrap();
+        assert_eq!(data.proposals[0].status, CoachProposalStatus::Approved);
+    }
+
+    #[test]
+    // Rejection persists the status transition without creating any tasks.
+    fn reject_coach_proposal_persists_without_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let proposal = coach_proposal_fixture(&goal);
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        let task_ids = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Reject, goal.version)
+            .unwrap();
+        assert!(task_ids.is_empty());
+        assert!(workspace.read_tasks().unwrap().is_empty());
+        let data = workspace.read_coach_data().unwrap();
+        assert_eq!(data.proposals[0].status, CoachProposalStatus::Rejected);
+        assert!(data.proposals[0].resolved_at.is_some());
+    }
+
+    #[test]
+    // A stale expected goal version must fail before any task is created and
+    // leave the proposal pending for a refreshed client decision.
+    fn stale_coach_proposal_version_fails_without_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let proposal = coach_proposal_fixture(&goal);
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        let error = workspace
+            .resolve_coach_proposal(
+                proposal.id,
+                CoachProposalDecision::Approve,
+                goal.version + 1,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("version is stale"), "{error}");
+        assert!(workspace.read_tasks().unwrap().is_empty());
+        let data = workspace.read_coach_data().unwrap();
+        assert_eq!(data.proposals[0].status, CoachProposalStatus::Pending);
+    }
+
+    #[test]
+    // Expired proposals persist the Expired transition even though the
+    // resolution itself fails, so the UI observes the expiry.
+    fn expired_coach_proposal_persists_expired_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Study")).unwrap();
+        let goal = coach_goal_fixture();
+        let mut proposal = coach_proposal_fixture(&goal);
+        proposal.expires_at = "2020-01-01T00:00:00Z".into();
+        write_coach_fixture(&workspace, &goal, &proposal);
+
+        let error = workspace
+            .resolve_coach_proposal(proposal.id, CoachProposalDecision::Approve, goal.version)
+            .unwrap_err();
+        assert!(error.to_string().contains("has expired"), "{error}");
+        assert!(workspace.read_tasks().unwrap().is_empty());
+        let data = workspace.read_coach_data().unwrap();
+        assert_eq!(data.proposals[0].status, CoachProposalStatus::Expired);
+        assert!(data.proposals[0].resolved_at.is_some());
     }
 
     #[test]

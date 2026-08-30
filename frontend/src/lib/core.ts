@@ -103,13 +103,6 @@ export async function chooseBackupExportPath(title = "Export StudyPulse Backup")
   return (await save({ defaultPath: "StudyPulse-Backup.studypulsebackup", title })) ?? null;
 }
 
-export async function chooseReportExportPath(defaultPath: string, title = "Export StudyPulse Report"): Promise<string | null> {
-  // Report formats share one destination chooser; the extension is supplied by
-  // the page and is not inferred or rewritten here.
-  if (!isDesktop) return null;
-  return (await save({ defaultPath, title })) ?? null;
-}
-
 // `core` is a typed facade over Tauri commands. Public method names are
 // camelCase for React, while Rust-facing keys are converted only where needed.
 export const core = {
@@ -235,9 +228,15 @@ export const core = {
   upsertExamSimulation: (value: ExamSimulation) => command<void>("upsert_exam_simulation", { value_json: JSON.stringify(value) }),
   deleteExamSimulation: (id: string) => command<void>("delete_exam_simulation", { id }),
   learningReport: async (rangeDays: number) => JSON.parse(await command<string>("get_learning_report", { range_days: rangeDays })) as LearningReport,
-  writeReportFile: (path: string, extension: "md" | "html", contents: string) => command<void>("write_report_file", { path, extension, contents }),
-  writeReportAsset: (path: string, contentsBase64: string) => command<void>("write_report_asset", { path, contents_base64: contentsBase64 }),
-  shareReport: (path: string) => command<void>("share_report", { path }),
+  // Report export never sends a destination from the renderer: the host opens
+  // the save dialog, pins the extension, and returns the written path (null
+  // when the dialog was cancelled). shareReport opens the host's own record
+  // of that export and takes no path argument.
+  exportReport: (format: "md" | "html", fileStem: string, contents: string) =>
+    command<string | null>("export_report", { format, file_stem: fileStem, contents }),
+  exportReportAsset: (fileStem: string, contentsBase64: string) =>
+    command<string | null>("export_report_asset", { file_stem: fileStem, contents_base64: contentsBase64 }),
+  shareReport: () => command<void>("share_report"),
   studySessions: () => command<StudySession[]>("get_study_sessions"),
   investmentSubjects: () => command<TimeInvestmentSubject[]>("get_time_investment_subjects"),
   upsertInvestmentSubject: (value: TimeInvestmentSubject) => command<void>("upsert_time_investment_subject", { value }),

@@ -9,6 +9,7 @@ import {
   pythonCodeForConfirmation,
 } from "../lib/agentEvents";
 import { core } from "../lib/core";
+import { sanitizeMarkup, svgSandboxDocument } from "../lib/sanitizeMarkup";
 import { localizeEnum, useI18n, type Translate } from "../i18n";
 import type {
   AgentEvent,
@@ -1115,30 +1116,6 @@ function QuestionSetView({ value, t }: { value: Record<string, unknown>; t: Tran
   );
 }
 
-function sanitizeMarkup(markup: string, allowSvg: boolean): string | null {
-  if (typeof DOMParser === "undefined") return null;
-  const doc = new DOMParser().parseFromString(markup, "text/html");
-  const root = allowSvg ? doc.querySelector("svg") : doc.body;
-  if (!root) return null;
-
-  root
-    .querySelectorAll("script, iframe, object, embed, foreignObject, form")
-    .forEach((el) => el.remove());
-  root.querySelectorAll("*").forEach((el) => {
-    [...el.attributes].forEach((attr) => {
-      const name = attr.name.toLowerCase();
-      const val = attr.value.toLowerCase().replace(/\s/g, "");
-      if (name.startsWith("on") || val.includes("javascript:") || val.includes("data:text/html")) {
-        el.removeAttribute(attr.name);
-      }
-      if ((name === "href" || name === "xlink:href" || name === "src") && val.startsWith("data:")) {
-        el.removeAttribute(attr.name);
-      }
-    });
-  });
-  return allowSvg ? root.outerHTML : root.innerHTML;
-}
-
 function VisualizationView({ value, t }: { value: Record<string, unknown>; t: Translate }) {
   const renderType = String(value.renderType ?? value.render_type ?? "markdown").toLowerCase();
   const content = String(value.content ?? "");
@@ -1149,7 +1126,7 @@ function VisualizationView({ value, t }: { value: Record<string, unknown>; t: Tr
     return (
       <section className="agent-structured-result panel">
         <h3>{t("agent.visualization")}</h3>
-        <div className="visualization-svg" dangerouslySetInnerHTML={{ __html: safeSvg }} />
+        <iframe title={t("agent.visualization")} sandbox="" srcDoc={svgSandboxDocument(safeSvg)} />
       </section>
     );
   }

@@ -612,7 +612,13 @@ impl AgentRuntime {
                 .clock
                 .now()
                 .to_rfc3339_opts(SecondsFormat::Millis, true);
-            let _ = self.workspace.write_agent_turn(&turn);
+            if let Err(error) = self.workspace.write_agent_turn(&turn) {
+                tracing::warn!(
+                    turn_id = %turn.id,
+                    error = %error,
+                    "failed to persist recovery status for Agent turn",
+                );
+            }
         }
     }
 
@@ -798,7 +804,16 @@ impl AgentRuntime {
             .clock
             .now()
             .to_rfc3339_opts(SecondsFormat::Millis, true);
-        let _ = self.workspace.write_agent_turn(&resumed_turn);
+        if let Err(error) = self.workspace.write_agent_turn(&resumed_turn) {
+            // The resumed run is already in flight, so this failure cannot be
+            // propagated; log it because an unconsumed source checkpoint may
+            // let the UI offer the same turn for recovery again.
+            tracing::warn!(
+                turn_id = %resumed_turn.id,
+                error = %error,
+                "failed to mark source Agent turn as resumed",
+            );
+        }
         Ok(run_id)
     }
 
@@ -941,7 +956,16 @@ impl AgentRuntime {
             state.active_run = Some(run_id.clone());
             state.runs.insert(run_id.clone(), Arc::clone(&control));
         }
-        self.persist_turn(&control);
+        if let Err(error) = self.persist_turn(&control) {
+            // Roll back the reserved slot so a failed start does not wedge the
+            // single-active-run guard behind a run that never began.
+            let mut state = self.state.lock();
+            if state.active_run.as_deref() == Some(&run_id) {
+                state.active_run = None;
+            }
+            state.runs.remove(&run_id);
+            return Err(AgentError::Runtime(error));
+        }
         let runtime = Arc::clone(self);
         // Keep the synchronous public API responsive while the current-thread
         // Tokio executor owns async model I/O and can select cancellation first.
@@ -1035,7 +1059,18 @@ impl AgentRuntime {
         state.active_run = Some(run_id.clone());
         state.runs.insert(run_id.clone(), Arc::clone(&control));
         drop(state);
-        self.persist_turn(&control);
+        if let Err(error) = self.persist_turn(&control) {
+            // Same fail-fast contract as the chat entry point: without the
+            // initial checkpoint there is nothing to recover, so the start
+            // fails and releases the reserved slot instead of spawning a run
+            // that reports success while unpersisted.
+            let mut state = self.state.lock();
+            if state.active_run.as_deref() == Some(&run_id) {
+                state.active_run = None;
+            }
+            state.runs.remove(&run_id);
+            return Err(AgentError::Runtime(error));
+        }
         let runtime = Arc::clone(self);
         thread::Builder::new()
             .name(format!("studypulse-agent-{run_id}"))
@@ -1242,7 +1277,10 @@ impl AgentRuntime {
                 ..EventFields::default()
             },
         );
-        self.checkpoint_messages(&control, &messages, 0, "safe", true);
+        if let Err(error) = self.checkpoint_messages(&control, &messages, 0, "safe", true) {
+            self.finish_with_error(&control, error);
+            return;
+        }
         // Permission is serialized as a hint for weaker models, not as an
         // authorization grant.  The host repeats the decision at prepare time.
         let definitions = if tool_policy.allow_tools {
@@ -1421,7 +1459,12 @@ impl AgentRuntime {
                     content: assistant_text,
                 });
             }
-            self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
+            if let Err(error) =
+                self.checkpoint_messages(&control, &messages, loop_index, "safe", true)
+            {
+                self.finish_with_error(&control, error);
+                return;
+            }
 
             if response.tool_calls.is_empty() {
                 // No tool call means the model turn is the final answer.  The
@@ -1465,6 +1508,16 @@ impl AgentRuntime {
                     &mut messages,
                 )
             {
+                // The batch helper ends with the same "safe" checkpoint the
+                // sequential path takes; it lives at the call site so a failed
+                // write can end the run instead of falling through to another
+                // loop iteration.
+                if let Err(error) =
+                    self.checkpoint_messages(&control, &messages, loop_index, "safe", true)
+                {
+                    self.finish_with_error(&control, error);
+                    return;
+                }
                 continue;
             }
             for call in response.tool_calls {
@@ -1538,13 +1591,16 @@ impl AgentRuntime {
                             ..EventFields::default()
                         },
                     );
-                    self.checkpoint_messages(
+                    if let Err(error) = self.checkpoint_messages(
                         &control,
                         &messages,
                         loop_index,
                         "waiting_confirmation",
                         true,
-                    );
+                    ) {
+                        self.finish_with_error(&control, error);
+                        return;
+                    }
                     let decision = self.wait_for_confirmation(&control);
                     if self.finish_if_cancelled(&control) {
                         return;
@@ -1572,7 +1628,12 @@ impl AgentRuntime {
                             name: prepared.name,
                             content: result,
                         });
-                        self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
+                        if let Err(error) =
+                            self.checkpoint_messages(&control, &messages, loop_index, "safe", true)
+                        {
+                            self.finish_with_error(&control, error);
+                            return;
+                        }
                         continue;
                     }
                 }
@@ -1626,7 +1687,12 @@ impl AgentRuntime {
                         name: prepared.name,
                         content: result,
                     });
-                    self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
+                    if let Err(error) =
+                        self.checkpoint_messages(&control, &messages, loop_index, "safe", true)
+                    {
+                        self.finish_with_error(&control, error);
+                        return;
+                    }
                     continue;
                 }
 
@@ -1634,7 +1700,19 @@ impl AgentRuntime {
                 // model therefore sees success and failure through one
                 // protocol, instead of through host-only side channels that
                 // would make retries or explanations inconsistent.
-                self.checkpoint_messages(&control, &messages, loop_index, "executing_tool", false);
+                // The unsafe-boundary checkpoint must land before execution:
+                // without it a crash during a side-effecting tool would leave
+                // an unresumable turn, so a failed write ends the run here.
+                if let Err(error) = self.checkpoint_messages(
+                    &control,
+                    &messages,
+                    loop_index,
+                    "executing_tool",
+                    false,
+                ) {
+                    self.finish_with_error(&control, error);
+                    return;
+                }
                 let result = self
                     // Only this execute path is allowed to perform the prepared
                     // invocation.  The selected Notebook sources are passed
@@ -1678,7 +1756,12 @@ impl AgentRuntime {
                     name: prepared.name,
                     content: result,
                 });
-                self.checkpoint_messages(&control, &messages, loop_index, "safe", true);
+                if let Err(error) =
+                    self.checkpoint_messages(&control, &messages, loop_index, "safe", true)
+                {
+                    self.finish_with_error(&control, error);
+                    return;
+                }
             }
         }
         self.finish_with_error(
@@ -1792,7 +1875,6 @@ impl AgentRuntime {
                 ..EventFields::default()
             },
         );
-        self.checkpoint_messages(control, messages, loop_index, "safe", true);
         true
     }
 
@@ -1985,10 +2067,20 @@ impl AgentRuntime {
         // All terminal exits converge here, including cancellation, provider
         // failure, and the loop cap.  Centralization prevents one exit path
         // from forgetting to clear the active-run guard or wake pollers.
-        // Terminal cleanup is centralized: update status, append the terminal
-        // event, release the single-active slot, and wake any event/consent
-        // waiter that may still be observing the run.
+        // Terminal cleanup is centralized: update status, release the
+        // single-active slot, append the terminal event, and wake any
+        // event/consent waiter that may still be observing the run.
         *control.status.lock() = status;
+        {
+            // The slot is released before the terminal transition becomes
+            // observable: once run_status reports a terminal status or the
+            // terminal event is delivered, a caller that immediately starts
+            // the next run must not race into AgentError::Busy.
+            let mut state = self.state.lock();
+            if state.active_run.as_deref() == Some(&control.run_id) {
+                state.active_run = None;
+            }
+        }
         let usage_json = serde_json::to_string(&*control.usage.lock()).ok();
         self.emit(
             control,
@@ -2014,7 +2106,17 @@ impl AgentRuntime {
                     .to_rfc3339_opts(SecondsFormat::Millis, true);
                 let snapshot = turn.clone();
                 drop(turn);
-                let _ = self.workspace.write_agent_turn(&snapshot);
+                if let Err(error) = self.workspace.write_agent_turn(&snapshot) {
+                    // The run is already terminal and the live UI received the
+                    // Result event; demoting a completed run over the
+                    // post-terminal write would discard finished work, so the
+                    // failure stays a logged warning.
+                    tracing::warn!(
+                        run_id = %control.run_id,
+                        error = %error,
+                        "failed to persist completed Agent turn",
+                    );
+                }
             }
             if let Ok(result) = serde_json::to_string(&self.turn_result(control)) {
                 self.emit(
@@ -2037,7 +2139,13 @@ impl AgentRuntime {
                 .to_rfc3339_opts(SecondsFormat::Millis, true);
             let snapshot = turn.clone();
             drop(turn);
-            let _ = self.workspace.write_agent_turn(&snapshot);
+            if let Err(error) = self.workspace.write_agent_turn(&snapshot) {
+                tracing::warn!(
+                    run_id = %control.run_id,
+                    error = %error,
+                    "failed to persist terminal Agent turn",
+                );
+            }
         }
         self.emit(
             control,
@@ -2048,10 +2156,6 @@ impl AgentRuntime {
                 ..EventFields::default()
             },
         );
-        let mut state = self.state.lock();
-        if state.active_run.as_deref() == Some(&control.run_id) {
-            state.active_run = None;
-        }
         control.events_changed.notify_all();
         control.confirmation_changed.notify_all();
     }
@@ -2114,7 +2218,16 @@ impl AgentRuntime {
             turn.updated_at = event.timestamp.clone();
             let snapshot = turn.clone();
             drop(turn);
-            let _ = self.workspace.write_agent_turn(&snapshot);
+            if let Err(error) = self.workspace.write_agent_turn(&snapshot) {
+                // The per-event snapshot mirrors in-memory state; the live run
+                // stays driven by memory, but a failed mirror must at least be
+                // observable instead of silently losing restart recovery.
+                tracing::warn!(
+                    run_id = %control.run_id,
+                    error = %error,
+                    "failed to persist Agent turn snapshot",
+                );
+            }
         }
         if event.kind == AgentEventKind::TextDelta
             && let Some(text) = &event.text
@@ -2132,15 +2245,28 @@ impl AgentRuntime {
         // the current UI and the run can complete normally.
         // Persistence is append-only and best-effort here; the in-memory event
         // stream remains the synchronization source while JSONL enables later
-        // inspection of a run without changing its live state machine.
-        if let Ok(line) = serde_json::to_string(event) {
-            let _ = self.workspace.append_agent_run_log(&event.run_id, &line);
+        // inspection of a run without changing its live state machine.  A
+        // failed append is logged so timeline loss is visible in diagnostics
+        // even though the run itself keeps going.
+        if let Ok(line) = serde_json::to_string(event)
+            && let Err(error) = self.workspace.append_agent_run_log(&event.run_id, &line)
+        {
+            tracing::warn!(
+                run_id = %event.run_id,
+                error = %error,
+                "failed to append Agent run log",
+            );
         }
     }
 
-    fn persist_turn(&self, control: &Arc<RunControl>) {
+    fn persist_turn(&self, control: &Arc<RunControl>) -> Result<(), String> {
+        // The initial checkpoint anchors crash recovery for the whole turn, so
+        // callers treat a failed write as a failed start instead of reporting
+        // a run whose recovery anchor silently never reached the disk.
         let turn = control.turn.lock().clone();
-        let _ = self.workspace.write_agent_turn(&turn);
+        self.workspace
+            .write_agent_turn(&turn)
+            .map_err(|error| format!("failed to persist Agent checkpoint: {error}"))
     }
 
     fn record_usage(
@@ -2198,7 +2324,10 @@ impl AgentRuntime {
         loop_index: usize,
         checkpoint: &str,
         resume_safe: bool,
-    ) {
+    ) -> Result<(), String> {
+        // Labeled checkpoints are the explicit-recovery contract: if one cannot
+        // be written the caller must end the run rather than keep reporting
+        // success on a turn that would not survive a restart.
         let mut turn = control.turn.lock();
         turn.history_json = serde_json::to_string(messages).unwrap_or_else(|_| "[]".into());
         turn.loop_index = loop_index as u32;
@@ -2210,7 +2339,9 @@ impl AgentRuntime {
             .to_rfc3339_opts(SecondsFormat::Millis, true);
         let snapshot = turn.clone();
         drop(turn);
-        let _ = self.workspace.write_agent_turn(&snapshot);
+        self.workspace
+            .write_agent_turn(&snapshot)
+            .map_err(|error| format!("failed to persist Agent checkpoint '{checkpoint}': {error}"))
     }
 
     fn control(&self, run_id: &str) -> Result<Arc<RunControl>, AgentError> {
@@ -2441,6 +2572,178 @@ mod tests {
                 return all;
             }
         }
+    }
+
+    #[derive(Debug)]
+    struct PlainAnswerModel;
+
+    #[async_trait]
+    impl ModelClient for PlainAnswerModel {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+            _on_text_delta: ModelTextDeltaHandler,
+        ) -> Result<ModelResponse, ModelError> {
+            Ok(ModelResponse {
+                text_deltas: vec!["All done".into()],
+                tool_calls: Vec::new(),
+                usage: None,
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct AskUserModel {
+        calls: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl ModelClient for AskUserModel {
+        async fn complete(
+            &self,
+            _request: ModelRequest,
+            _on_text_delta: ModelTextDeltaHandler,
+        ) -> Result<ModelResponse, ModelError> {
+            let mut calls = self.calls.lock();
+            if *calls == 0 {
+                *calls += 1;
+                Ok(ModelResponse {
+                    text_deltas: Vec::new(),
+                    tool_calls: vec![ModelToolCall {
+                        id: "ask-1".into(),
+                        name: "ask_user".into(),
+                        arguments: json!({"prompt": "Continue with the plan?"}),
+                    }],
+                    usage: None,
+                })
+            } else {
+                Ok(ModelResponse {
+                    text_deltas: vec!["Resumed answer".into()],
+                    tool_calls: Vec::new(),
+                    usage: None,
+                })
+            }
+        }
+    }
+
+    // Replacing the turns directory with a regular file makes every turn
+    // write fail with an IO error, which simulates disk-full and broken-path
+    // conditions without reaching into Workspace internals.
+    fn break_turn_storage(workspace: &Workspace) -> std::path::PathBuf {
+        let turns = workspace.root().join("Agent/turns");
+        std::fs::remove_dir_all(&turns).unwrap();
+        std::fs::write(&turns, b"not a directory").unwrap();
+        turns
+    }
+
+    fn restore_turn_storage(turns: &std::path::Path) {
+        std::fs::remove_file(turns).unwrap();
+        std::fs::create_dir(turns).unwrap();
+    }
+
+    #[test]
+    fn start_agent_fails_when_initial_checkpoint_cannot_be_persisted() {
+        // A start whose initial checkpoint never reaches the disk must fail
+        // the start outright instead of reporting a run that cannot be
+        // recovered after a crash.
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
+        let runtime = AgentRuntime::with_clock(
+            workspace.clone(),
+            Arc::new(PlainAnswerModel),
+            Arc::new(FixedClock),
+        );
+        let turns = break_turn_storage(&workspace);
+        let error = runtime
+            .start_agent("Recover algebra".into(), Vec::new(), Vec::new())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to persist Agent checkpoint")
+        );
+        // The failed start must not wedge the single-active-run guard.
+        restore_turn_storage(&turns);
+        let run_id = runtime
+            .start_agent("Recover algebra".into(), Vec::new(), Vec::new())
+            .unwrap();
+        wait_for_terminal(&runtime, &run_id);
+    }
+
+    #[test]
+    fn checkpoint_failure_fails_the_run_instead_of_reporting_success() {
+        // While the run is parked on ask_user the test breaks turn storage, so
+        // the next checkpoint write fails: the run must surface a Failed event
+        // rather than continue as if the recovery state had been saved.
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
+        let runtime = AgentRuntime::with_clock(
+            workspace.clone(),
+            Arc::new(AskUserModel::default()),
+            Arc::new(FixedClock),
+        );
+        let run_id = runtime
+            .start_agent("Plan the session".into(), Vec::new(), Vec::new())
+            .unwrap();
+        let mut cursor = 0;
+        let input_id = loop {
+            let events = runtime.wait_for_events(&run_id, cursor, 500).unwrap();
+            if let Some(last) = events.last() {
+                cursor = last.sequence;
+            }
+            if let Some(event) = events
+                .iter()
+                .find(|event| event.kind == AgentEventKind::InputRequired)
+            {
+                break event.confirmation_id.clone().unwrap();
+            }
+        };
+        let turns = break_turn_storage(&workspace);
+        runtime
+            .submit_input(&run_id, &input_id, json!("yes").to_string())
+            .unwrap();
+        let events = wait_for_terminal(&runtime, &run_id);
+        let failed = events
+            .iter()
+            .find(|event| event.kind == AgentEventKind::Failed)
+            .expect("checkpoint failure must produce a Failed event");
+        assert!(
+            failed
+                .text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failed to persist Agent checkpoint")
+        );
+        assert_eq!(runtime.run_status(&run_id).unwrap(), RunStatus::Failed);
+        // The terminal path released the slot, so a later start still works.
+        restore_turn_storage(&turns);
+        let run_id = runtime
+            .start_agent("Plan the session".into(), Vec::new(), Vec::new())
+            .unwrap();
+        wait_for_terminal(&runtime, &run_id);
+    }
+
+    #[test]
+    fn run_log_failure_stays_best_effort_and_completes_the_run() {
+        // The JSONL run log is an audit/replay aid while the in-memory event
+        // stream drives the run, so a broken log must not fail an otherwise
+        // healthy run; the failure is only logged.
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::create(temp.path().join("Workspace")).unwrap();
+        let runs = workspace.root().join("Agent/runs");
+        std::fs::remove_dir_all(&runs).unwrap();
+        std::fs::write(&runs, b"not a directory").unwrap();
+        let runtime =
+            AgentRuntime::with_clock(workspace, Arc::new(PlainAnswerModel), Arc::new(FixedClock));
+        let run_id = runtime
+            .start_agent("Summarize progress".into(), Vec::new(), Vec::new())
+            .unwrap();
+        let events = wait_for_terminal(&runtime, &run_id);
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == AgentEventKind::Completed)
+        );
     }
 
     #[test]
